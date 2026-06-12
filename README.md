@@ -13,8 +13,8 @@ Aplicación de escritorio para diligenciar el Formulario 510 de la DIAN Colombia
 
 1. Abrir `Formulario510.exe` con doble clic
 2. Llenar el formulario manualmente, **o**
-3. Usar la plantilla `PlantillaFormulario510.xlsx` y presionar **📥 Cargar desde Excel**
-4. Presionar **📄 Generar PDF** para exportar la declaración
+3. Usar la plantilla `PlantillaFormulario510.xlsx` y presionar **Cargar desde Excel**
+4. Presionar **Generar PDF** para exportar la declaración
 
 ## Archivos incluidos
 
