@@ -1,0 +1,33 @@
+name: Build Formulario510 EXE
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install reportlab openpyxl pyinstaller
+
+      - name: Build EXE
+        run: |
+          pyinstaller --onefile --windowed --name "Formulario510" main.py
+
+      - name: Upload EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: Formulario510-Windows
+          path: dist/Formulario510.exe
+          retention-days: 30
