@@ -287,6 +287,7 @@ class App(tk.Tk):
 
         # Action buttons
         for text, cmd, bg, fg in [
+            ("🔄  Actualizar TRM",     self._update_trm, "#7c3aed", "white"),
             ("📥  Cargar desde Excel", self._load_excel, "#0f766e", "white"),
             ("📄  Generar PDF",        self._generate,   "#3b82f6", "white"),
             ("🗑️  Limpiar formulario", self._clear,      "#1e2535", "#64748b"),
@@ -295,6 +296,11 @@ class App(tk.Tk):
                       relief="flat", bd=0, padx=10, pady=8, cursor="hand2",
                       activebackground=bg, activeforeground=fg,
                       command=cmd).pack(fill="x", padx=10, pady=2)
+
+        # TRM status label
+        self.lbl_trm_status = tk.Label(sb, text="", font=("Arial",7),
+                                        bg="#0f1724", fg="#4a6a8a", wraplength=170)
+        self.lbl_trm_status.pack(padx=10, pady=(0,4))
 
         # ── Scrollable main area ──
         cf = tk.Frame(body, bg="#f1f5f9"); cf.pack(side="left", fill="both", expand=True)
@@ -543,6 +549,41 @@ class App(tk.Tk):
             b.config(bg="#0d1e30" if i==idx else "#0f1724",
                      fg="#e0eaf4" if i==idx else "#4a6a8a",
                      font=("Arial",10,"bold") if i==idx else ("Arial",10))
+
+    # ─── TRM automática ──────────────────────────────────────────────────────
+    def _update_trm(self):
+        import urllib.request, json, threading
+        self.lbl_trm_status.config(text="Consultando TRM...", fg="#f59e0b")
+        def fetch():
+            try:
+                today = date.today().strftime("%Y-%m-%d")
+                url = (f"https://www.datos.gov.co/resource/mcec-87by.json"
+                       f"?vigenciadesde={today}&vigenciahasta={today}")
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=8) as r:
+                    data = json.loads(r.read())
+                if data and "valor" in data[0]:
+                    trm = float(data[0]["valor"])
+                    self.after(0, lambda: self._apply_trm(trm, today))
+                else:
+                    # Fallback: API Banco de la República
+                    url2 = (f"https://www.banrep.gov.co/es/trm-api?"
+                            f"startDate={today}&endDate={today}")
+                    req2 = urllib.request.Request(url2, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(req2, timeout=8) as r2:
+                        data2 = json.loads(r2.read())
+                    trm = float(data2[0]["value"])
+                    self.after(0, lambda: self._apply_trm(trm, today))
+            except Exception as e:
+                self.after(0, lambda: self.lbl_trm_status.config(
+                    text=f"Sin conexión. Ingrese TRM manualmente.", fg="#ef4444"))
+        threading.Thread(target=fetch, daemon=True).start()
+
+    def _apply_trm(self, trm, fecha):
+        self._set_field("tasaCambio", f"{trm:.2f}")
+        self._calc()
+        self.lbl_trm_status.config(
+            text=f"TRM {fecha}\n${trm:,.2f} COP/USD", fg="#22c55e")
 
     # ─── Load from Excel ─────────────────────────────────────────────────────
     def _load_excel(self):
