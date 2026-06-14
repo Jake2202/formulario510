@@ -155,7 +155,7 @@ def make_pdf(data, path):
             if len(row) == 4:
                 tdata.append(row); row = []
         if row:
-            while len(row) < 4: row.append(["",""])
+            while len(row) < 4: row.append([Paragraph("", s_lbl), Paragraph("", s_val)])
             tdata.append(row)
         if not tdata: return
         t = Table(tdata, colWidths=cw, hAlign="LEFT")
@@ -254,16 +254,20 @@ def make_pdf(data, path):
     ]))
     story.append(lt); story.append(Spacer(1,8))
 
-    ct = Table([[
-        [Paragraph("Casilla 72 — Total Arancel $", s_lbl), Paragraph(fmt_cop(araC), s_total)],
-        [Paragraph("Casilla 76 — Total IVA $",     s_lbl), Paragraph(fmt_cop(ivaC), s_total)],
-        [Paragraph("Casilla 980 — Pago total $",   s_lbl), Paragraph(fmt_cop(total),s_total)],
-    ]], colWidths=[60*mm, 60*mm, 62*mm])
+    ct_data = [
+        [Paragraph("Casilla 72 — Total Arancel $", s_lbl),
+         Paragraph("Casilla 76 — Total IVA $", s_lbl),
+         Paragraph("Casilla 980 — Pago total $", s_lbl)],
+        [Paragraph(fmt_cop(araC), s_total),
+         Paragraph(fmt_cop(ivaC), s_total),
+         Paragraph(fmt_cop(total), s_total)],
+    ]
+    ct = Table(ct_data, colWidths=[60*mm, 60*mm, 62*mm])
     ct.setStyle(TableStyle([
         ("BOX",(0,0),(-1,-1),1.5,BLUE),("INNERGRID",(0,0),(-1,-1),0.5,BORDER),
         ("BACKGROUND",(0,0),(-1,-1),LBLUE),
         ("TOPPADDING",(0,0),(-1,-1),8),("BOTTOMPADDING",(0,0),(-1,-1),8),
-        ("LEFTPADDING",(0,0),(-1,-1),10),
+        ("LEFTPADDING",(0,0),(-1,-1),10),("VALIGN",(0,0),(-1,-1),"MIDDLE"),
     ]))
     story.append(ct); story.append(Spacer(1,16))
     firma_data = [
