@@ -266,12 +266,16 @@ def make_pdf(data, path):
         ("LEFTPADDING",(0,0),(-1,-1),10),
     ]))
     story.append(ct); story.append(Spacer(1,16))
-    ft = Table([[
-        [Paragraph("Firma del declarante", s_lbl), Spacer(1,20), HRFlowable(width="80%",thickness=0.5,color=BORDER)],
-        [Paragraph("Nombre completo",       s_lbl), Spacer(1,20), HRFlowable(width="80%",thickness=0.5,color=BORDER)],
-        [Paragraph("C.C. No.",              s_lbl), Spacer(1,20), HRFlowable(width="80%",thickness=0.5,color=BORDER)],
-    ]], colWidths=[60*mm, 60*mm, 62*mm])
-    ft.setStyle(TableStyle([("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4),("LEFTPADDING",(0,0),(-1,-1),6)]))
+    firma_data = [
+        [Paragraph("Firma del declarante", s_lbl), Paragraph("Nombre completo", s_lbl), Paragraph("C.C. No.", s_lbl)],
+        [Paragraph("_______________________", s_val), Paragraph("_______________________", s_val), Paragraph("_______________________", s_val)],
+    ]
+    ft = Table(firma_data, colWidths=[60*mm, 60*mm, 62*mm])
+    ft.setStyle(TableStyle([
+        ("TOPPADDING",(0,0),(-1,-1),6),("BOTTOMPADDING",(0,0),(-1,-1),6),
+        ("LEFTPADDING",(0,0),(-1,-1),6),("VALIGN",(0,0),(-1,-1),"BOTTOM"),
+        ("BOX",(0,0),(-1,-1),0.5,BORDER),("INNERGRID",(0,0),(-1,-1),0.3,BORDER),
+    ]))
     story.append(ft); story.append(Spacer(1,8))
     story.append(HRFlowable(width="100%", thickness=0.5, color=BORDER)); story.append(Spacer(1,4))
     story.append(Paragraph(
@@ -617,22 +621,22 @@ class App(tk.Tk):
         for i,(sid,label) in enumerate([
             ("s0","01  Importador"),("s1","02  Declarante"),
             ("s2","03  Transporte"),("s3","04  Mercancía"),("s4","05  Liquidación")]):
-            b = tk.Button(sb, text=label, font=("Arial",11), anchor="w",
+            b = tk.Button(sb, text=label, font=("Arial",10), anchor="w",
                           bg="#0f1724", fg="#4a6a8a", relief="flat",
                           activebackground="#1a2535", activeforeground="#e0eaf4",
-                          bd=0, padx=14, pady=8, cursor="hand2",
+                          bd=0, padx=12, pady=5, cursor="hand2",
                           command=lambda idx=i: self._jump(idx))
             b.pack(fill="x", padx=8, pady=1)
             self._nav_btns.append(b)
 
         # Total box
-        tf = tk.Frame(sb, bg="#070d15"); tf.pack(fill="x", padx=10, pady=(16,4))
-        tk.Label(tf, text="TOTAL A PAGAR", font=("Arial",9,"bold"),
-                 bg="#070d15", fg="#1e3a5f").pack(anchor="w", padx=10, pady=(8,0))
-        self.lbl_total = tk.Label(tf, text="$0", font=("Arial",22,"bold"),
+        tf = tk.Frame(sb, bg="#070d15"); tf.pack(fill="x", padx=10, pady=(8,2))
+        tk.Label(tf, text="TOTAL A PAGAR", font=("Arial",8,"bold"),
+                 bg="#070d15", fg="#1e3a5f").pack(anchor="w", padx=10, pady=(4,0))
+        self.lbl_total = tk.Label(tf, text="$0", font=("Arial",18,"bold"),
                                    bg="#070d15", fg="#3b82f6")
         self.lbl_total.pack(anchor="w", padx=10)
-        tk.Label(tf, text="COP", font=("Arial",9), bg="#070d15", fg="#2a4060").pack(anchor="w", padx=10, pady=(0,4))
+        tk.Label(tf, text="COP", font=("Arial",8), bg="#070d15", fg="#2a4060").pack(anchor="w", padx=10, pady=(0,2))
         for lbl, attr in [("Arancel","lbl_ara"),("IVA","lbl_iva"),("Imp. Consumo","lbl_ic")]:
             row = tk.Frame(tf, bg="#070d15"); row.pack(fill="x", padx=10, pady=1)
             tk.Label(row, text=lbl, font=("Arial",9), bg="#070d15", fg="#1e3a5f").pack(side="left")
@@ -646,8 +650,8 @@ class App(tk.Tk):
         self.lbl_trm_status.pack(padx=10, pady=(2,2))
 
         # Action buttons
-        tk.Label(sb, text="ACCIONES", font=("Arial",9,"bold"),
-                 bg="#0f1724", fg="#1e3a5f").pack(pady=(10,4), padx=16, anchor="w")
+        tk.Label(sb, text="ACCIONES", font=("Arial",8,"bold"),
+                 bg="#0f1724", fg="#1e3a5f").pack(pady=(6,2), padx=16, anchor="w")
 
         for text, cmd, bg, fg in [
             ("👥  Clientes",          self._abrir_clientes,   "#1e3a5f", "white"),
@@ -659,10 +663,10 @@ class App(tk.Tk):
             ("📄  Generar PDF",        self._generate,         "#3b82f6", "white"),
             ("🗑️  Limpiar",            self._clear,            "#1e2535", "#64748b"),
         ]:
-            tk.Button(sb, text=text, font=("Arial",10,"bold"), bg=bg, fg=fg,
-                      relief="flat", bd=0, padx=10, pady=7, cursor="hand2",
+            tk.Button(sb, text=text, font=("Arial",9,"bold"), bg=bg, fg=fg,
+                      relief="flat", bd=0, padx=8, pady=5, cursor="hand2",
                       activebackground=bg, activeforeground=fg,
-                      command=cmd).pack(fill="x", padx=10, pady=1)
+                      command=cmd).pack(fill="x", padx=8, pady=1)
 
         # ── Scrollable main ──
         cf = tk.Frame(body, bg="#f1f5f9"); cf.pack(side="left", fill="both", expand=True)
@@ -894,12 +898,22 @@ class App(tk.Tk):
     def _jump(self, idx):
         sec = self._sections[idx]
         self.canvas.update_idletasks()
-        y = sec.winfo_y(); total_h = self.inner.winfo_height(); canvas_h = self.canvas.winfo_height()
-        self.canvas.yview_moveto(max(0, min(1, y / max(total_h - canvas_h, 1))))
+        # Get position of section relative to inner frame
+        y = 0
+        widget = sec
+        while widget != self.inner:
+            y += widget.winfo_y()
+            widget = widget.master
+            if widget is None:
+                break
+        total_h = self.inner.winfo_height()
+        canvas_h = self.canvas.winfo_height()
+        frac = y / max(total_h - canvas_h, 1)
+        self.canvas.yview_moveto(max(0.0, min(1.0, frac)))
         for i,b in enumerate(self._nav_btns):
             b.config(bg="#0d1e30" if i==idx else "#0f1724",
                      fg="#e0eaf4" if i==idx else "#4a6a8a",
-                     font=("Arial",11,"bold") if i==idx else ("Arial",11))
+                     font=("Arial",10,"bold") if i==idx else ("Arial",10))
 
     def _auto_dv(self, *args):
         nit = self._get_field("nit").strip()
@@ -931,10 +945,27 @@ class App(tk.Tk):
 
     def _guardar_decl(self):
         if not self._cliente_id:
-            if not messagebox.askyesno("Sin cliente",
-                "No hay cliente seleccionado.\n¿Desea guardar sin asociar a un cliente?\n\n"
-                "Recomendado: primero seleccione un cliente desde 👥 Clientes."):
-                return
+            # Try to find client by NIT already in form
+            nit = self._get_field("nit").strip()
+            if nit:
+                rows = db_fetch("SELECT id FROM clientes WHERE nit=?", (nit,))
+                if rows:
+                    self._cliente_id = rows[0][0]
+            if not self._cliente_id:
+                # Auto-create client from form data
+                nit = self._get_field("nit").strip()
+                razon = self._get_field("razonSocial").strip()
+                if nit and razon:
+                    self._cliente_id = db_exec(
+                        "INSERT INTO clientes(nit,dv,razon_social,direccion,telefono,cod_seccional,cod_dpto,cod_municipio) VALUES(?,?,?,?,?,?,?,?)",
+                        (nit, self._get_field("dv"), razon, self._get_field("direccion"),
+                         self._get_field("telefono"), self._get_field("codSeccional"),
+                         self._get_field("codDpto"), self._get_field("codMunicipio")))
+                    self.lbl_cliente_badge.config(text=f"👤 {razon}")
+                else:
+                    if not messagebox.askyesno("Sin cliente",
+                        "No hay cliente seleccionado ni NIT ingresado.\n¿Guardar sin cliente?"):
+                        return
         self._calc()
         data = {k: self._get_field(k) for k in self.fields}
         try:
@@ -1097,3 +1128,4 @@ class App(tk.Tk):
 if __name__ == "__main__":
     app = App()
     app.mainloop()
+
