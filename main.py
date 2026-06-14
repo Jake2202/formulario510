@@ -896,24 +896,24 @@ class App(tk.Tk):
         self._total_cop = total
 
     def _jump(self, idx):
-        sec = self._sections[idx]
         self.canvas.update_idletasks()
-        # Get position of section relative to inner frame
+        if idx >= len(self._sections): return
+        sec = self._sections[idx]
+        # Walk up to get y relative to inner frame
         y = 0
-        widget = sec
-        while widget != self.inner:
-            y += widget.winfo_y()
-            widget = widget.master
-            if widget is None:
-                break
-        total_h = self.inner.winfo_height()
-        canvas_h = self.canvas.winfo_height()
+        w = sec
+        while w is not None and w != self.inner:
+            y += w.winfo_y()
+            w = w.master
+        total_h = max(self.inner.winfo_height(), 1)
+        canvas_h = max(self.canvas.winfo_height(), 1)
         frac = y / max(total_h - canvas_h, 1)
         self.canvas.yview_moveto(max(0.0, min(1.0, frac)))
-        for i,b in enumerate(self._nav_btns):
-            b.config(bg="#0d1e30" if i==idx else "#0f1724",
-                     fg="#e0eaf4" if i==idx else "#4a6a8a",
-                     font=("Arial",10,"bold") if i==idx else ("Arial",10))
+        for i, b in enumerate(self._nav_btns):
+            b.config(
+                bg="#0d1e30" if i == idx else "#0f1724",
+                fg="#e0eaf4" if i == idx else "#4a6a8a",
+                font=("Arial", 10, "bold") if i == idx else ("Arial", 10))
 
     def _auto_dv(self, *args):
         nit = self._get_field("nit").strip()
@@ -990,20 +990,34 @@ class App(tk.Tk):
     def _update_trm(self):
         self.lbl_trm_status.config(text="Consultando TRM...", fg="#f59e0b")
         def fetch():
+            trm = None
+            today = date.today().strftime("%Y-%m-%d")
+            # Intento 1: datos.gov.co
             try:
-                today = date.today().strftime("%Y-%m-%d")
                 url = (f"https://www.datos.gov.co/resource/mcec-87by.json"
-                       f"?vigenciadesde={today}&vigenciahasta={today}")
-                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=8) as r:
+                       f"?$where=vigenciadesde>='{today}T00:00:00.000'&$limit=1&$order=vigenciadesde DESC")
+                req = urllib.request.Request(url, headers={"User-Agent":"Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=6) as r:
                     data = json.loads(r.read())
                 if data and "valor" in data[0]:
-                    trm = float(data[0]["valor"])
-                    self.after(0, lambda: self._apply_trm(trm, today))
-                    return
+                    trm = float(str(data[0]["valor"]).replace(",","."))
             except: pass
-            self.after(0, lambda: self.lbl_trm_status.config(
-                text="Sin conexión. Ingrese TRM manualmente.", fg="#ef4444"))
+            # Intento 2: si no hay TRM para hoy (fin de semana/festivo), buscar la más reciente
+            if not trm:
+                try:
+                    url2 = "https://www.datos.gov.co/resource/mcec-87by.json?$limit=1&$order=vigenciadesde DESC"
+                    req2 = urllib.request.Request(url2, headers={"User-Agent":"Mozilla/5.0"})
+                    with urllib.request.urlopen(req2, timeout=6) as r2:
+                        data2 = json.loads(r2.read())
+                    if data2 and "valor" in data2[0]:
+                        trm = float(str(data2[0]["valor"]).replace(",","."))
+                        today = str(data2[0].get("vigenciadesde",""))[:10]
+                except: pass
+            if trm and trm > 0:
+                self.after(0, lambda t=trm, d=today: self._apply_trm(t, d))
+            else:
+                self.after(0, lambda: self.lbl_trm_status.config(
+                    text="Sin conexión.\nIngrese TRM manualmente.", fg="#ef4444"))
         threading.Thread(target=fetch, daemon=True).start()
 
     def _apply_trm(self, trm, fecha):
@@ -1128,4 +1142,3 @@ class App(tk.Tk):
 if __name__ == "__main__":
     app = App()
     app.mainloop()
-
