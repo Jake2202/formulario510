@@ -1930,20 +1930,7 @@ class App(tk.Frame):
             self._set_defaults()
 
 
-if __name__ == "__main__":
-    root = tk.Tk()
-    root.withdraw()  # Hide main window until login
-    init_db()
-
-    def on_login(user, rol):
-        root.deiconify()
-        app = App(root, user, rol)
-
-    def on_splash_ready():
-        VentanaLogin(root, on_login)
-
-    SplashScreen(root, on_splash_ready)
-    root.mainloop()
+# __main__ moved to end of file
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2557,3 +2544,18 @@ Nota: Este documento puede requerir autenticación notarial según el caso.
         tk.Button(frame, text="📄  Generar Poder", font=("Arial",11,"bold"),
                   bg="#1d4ed8", fg="white", relief="flat", pady=10,
                   cursor="hand2", command=generar).pack(fill="x", pady=16)
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    root.withdraw()  # Hide main window until login
+    init_db()
+
+    def on_login(user, rol):
+        root.deiconify()
+        app = App(root, user, rol)
+
+    def on_splash_ready():
+        VentanaLogin(root, on_login)
+
+    SplashScreen(root, on_splash_ready)
+    root.mainloop()
