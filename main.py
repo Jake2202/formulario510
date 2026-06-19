@@ -1327,8 +1327,21 @@ class App(tk.Frame):
         body = tk.Frame(self.master, bg="#f1f5f9"); body.pack(fill="both", expand=True)
 
         # ── Sidebar ──
-        sb = tk.Frame(body, bg="#0f1724", width=220)
-        sb.pack(side="left", fill="y"); sb.pack_propagate(False)
+        sb_outer = tk.Frame(body, bg="#0f1724", width=220)
+        sb_outer.pack(side="left", fill="y"); sb_outer.pack_propagate(False)
+
+        # Scrollable sidebar
+        sb_canvas = tk.Canvas(sb_outer, bg="#0f1724", highlightthickness=0, width=220)
+        sb_scroll = ttk.Scrollbar(sb_outer, orient="vertical", command=sb_canvas.yview)
+        sb_canvas.configure(yscrollcommand=sb_scroll.set)
+        sb_scroll.pack(side="right", fill="y")
+        sb_canvas.pack(side="left", fill="both", expand=True)
+        sb = tk.Frame(sb_canvas, bg="#0f1724")
+        sb_win = sb_canvas.create_window((0,0), window=sb, anchor="nw")
+        sb.bind("<Configure>", lambda e: sb_canvas.configure(scrollregion=sb_canvas.bbox("all")))
+        sb_canvas.bind("<Configure>", lambda e: sb_canvas.itemconfig(sb_win, width=e.width))
+        sb_canvas.bind("<MouseWheel>", lambda e: sb_canvas.yview_scroll(int(-1*(e.delta/120)),"units"))
+        sb.bind("<MouseWheel>", lambda e: sb_canvas.yview_scroll(int(-1*(e.delta/120)),"units"))
 
         tk.Label(sb, text="SECCIONES", font=("Arial",9,"bold"),
                  bg="#0f1724", fg="#1e3a5f").pack(pady=(18,6), padx=16, anchor="w")
@@ -1342,6 +1355,7 @@ class App(tk.Frame):
                           bd=0, padx=12, pady=5, cursor="hand2",
                           command=lambda idx=i: self._jump(idx))
             b.pack(fill="x", padx=8, pady=1)
+            b.bind("<MouseWheel>", lambda e: sb_canvas.yview_scroll(int(-1*(e.delta/120)),"units"))
             self._nav_btns.append(b)
 
         # Total box
@@ -1389,10 +1403,12 @@ class App(tk.Frame):
             ("⚙️  Configuración",      self._abrir_config,        "#1e2535", "#94a3b8"),
             ("🗑️  Limpiar",            self._clear,               "#1e2535", "#64748b"),
         ]:
-            tk.Button(sb, text=text, font=("Arial",9,"bold"), bg=bg, fg=fg,
+            btn = tk.Button(sb, text=text, font=("Arial",9,"bold"), bg=bg, fg=fg,
                       relief="flat", bd=0, padx=8, pady=5, cursor="hand2",
                       activebackground=bg, activeforeground=fg,
-                      command=cmd).pack(fill="x", padx=8, pady=1)
+                      command=cmd)
+            btn.pack(fill="x", padx=8, pady=1)
+            btn.bind("<MouseWheel>", lambda e: sb_canvas.yview_scroll(int(-1*(e.delta/120)),"units"))
 
         # ── Scrollable main ──
         cf = tk.Frame(body, bg="#f1f5f9"); cf.pack(side="left", fill="both", expand=True)
@@ -1529,7 +1545,7 @@ class App(tk.Frame):
             w = tk.Label(cf2,text="$0",font=("Arial",14,"bold"),bg="#dbeafe",fg="#1d4ed8",anchor="e")
             w.pack(fill="x",padx=8,pady=(0,6)); setattr(self,ca,w)
 
-        tk.Frame(self.inner,bg="#f1f5f9",height=30).pack()
+        tk.Frame(self.inner,bg="#f1f5f9",height=60).pack()
 
     # ── Logic ────────────────────────────────────────────────────────────────
     def _set_defaults(self):
