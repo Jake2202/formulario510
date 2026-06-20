@@ -1,7 +1,7 @@
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from datetime import date, datetime, timedelta
-import os, sys, sqlite3, json, threading, urllib.request, webbrowser, hashlib, random, string, shutil
+import os, sys, sqlite3, json, threading, urllib.request, urllib.parse, webbrowser, hashlib, random, string, shutil
 
 try:
     import openpyxl
@@ -140,15 +140,18 @@ def fmt_cop(n):
     except: return "$0"
 
 def calcular_dv(nit):
+    """Calcula el dígito de verificación del NIT colombiano (algoritmo oficial DIAN,
+    módulo 11). Los pesos se aplican de derecha a izquierda: 3,7,13,17,19,23,29,37,41,43,47,53,59,67,71."""
     try:
         nit_str = str(nit).strip().replace(".","").replace("-","")
-        if not nit_str.isdigit(): return ""
-        factores = [71,67,59,53,47,43,41,37,29,23,19,17,13,7,3,2]
-        nit_pad = nit_str.zfill(15)
-        total = sum(int(d)*f for d,f in zip(nit_pad, factores))
+        if not nit_str.isdigit() or not nit_str: return ""
+        factores = [3,7,13,17,19,23,29,37,41,43,47,53,59,67,71]
+        digitos_invertidos = nit_str[::-1]
+        total = sum(int(d) * factores[i] for i, d in enumerate(digitos_invertidos) if i < len(factores))
         residuo = total % 11
-        dv = 11 - residuo if residuo > 1 else residuo
-        return str(dv)
+        if residuo == 0: return "0"
+        if residuo == 1: return "1"
+        return str(11 - residuo)
     except: return ""
 
 # ── PDF ───────────────────────────────────────────────────────────────────────
@@ -986,11 +989,12 @@ class VentanaEDI(tk.Toplevel):
 
     def _generar_xml(self):
         d = self.data
-        def g(k): return str(d.get(k,"") or "").strip()
-        fob=float(g("fob") or 0); flt=float(g("fletes") or 0)
-        seg=float(g("seguros") or 0); otr=float(g("otrosGastos") or 0)
-        adj=float(g("ajuste") or 0); trm=float(g("tasaCambio") or 4150)
-        ap=float(g("arancelPct") or 0); ip=float(g("ivaPct") or 19); icp=float(g("icPct") or 0)
+        import xml.sax.saxutils as saxutils
+        def g(k): return saxutils.escape(str(d.get(k,"") or "").strip())
+        fob=float(d.get("fob","0") or 0); flt=float(d.get("fletes","0") or 0)
+        seg=float(d.get("seguros","0") or 0); otr=float(d.get("otrosGastos","0") or 0)
+        adj=float(d.get("ajuste","0") or 0); trm=float(d.get("tasaCambio","4150") or 4150)
+        ap=float(d.get("arancelPct","0") or 0); ip=float(d.get("ivaPct","19") or 19); icp=float(d.get("icPct","0") or 0)
         cif=fob+flt+seg+otr+adj; cifC=cif*trm
         araC=cifC*(ap/100); ivaC=(cifC+araC)*(ip/100); icC=cifC*(icp/100); total=araC+ivaC+icC
 
@@ -1280,26 +1284,31 @@ Portal SYGA: https://importaciones.dian.gov.co
 # ═══════════════════════════════════════════════════════════════════════════════
 # APP PRINCIPAL
 # ═══════════════════════════════════════════════════════════════════════════════
-class App(tk.Frame):
+class App(tk.Toplevel):
     def __init__(self, master, user="admin", rol="admin"):
         super().__init__(master)
         self.master = master
-        master.title(f"DeclaraFácil 510 — {user} ({rol})")
-        master.geometry("1150x800")
-        master.minsize(980, 680)
-        master.configure(bg="#f1f5f9")
-        master.resizable(True, True)
+        self.title(f"DeclaraFácil 510 — {user} ({rol})")
+        self.geometry("1150x800")
+        self.minsize(980, 680)
+        self.configure(bg="#f1f5f9")
+        self.resizable(True, True)
         self.user = user; self.rol = rol
         self.fields = {}
         self._sections = []
         self._nav_btns = []
         self._cliente_id = None
         self._decl_id = None
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._build_ui()
         self._set_defaults()
-        self.pack(fill="both", expand=True)
         # Auto-backup on start
         self._auto_backup()
+
+    def _on_close(self):
+        import sys
+        self.master.destroy()
+        sys.exit(0)
 
     def _auto_backup(self):
         try:
@@ -1311,7 +1320,7 @@ class App(tk.Frame):
 
     def _build_ui(self):
         # ── Top bar ──
-        top = tk.Frame(self.master, bg="#1d4ed8", height=54)
+        top = tk.Frame(self, bg="#1d4ed8", height=54)
         top.pack(fill="x"); top.pack_propagate(False)
         tk.Label(top, text="DeclaraFácil 510", font=("Arial",16,"bold"),
                  bg="#1d4ed8", fg="white").pack(side="left", padx=20, pady=10)
@@ -1324,7 +1333,7 @@ class App(tk.Frame):
                                            padx=10, pady=4)
         self.lbl_cliente_badge.pack(side="right", padx=16, pady=10)
 
-        body = tk.Frame(self.master, bg="#f1f5f9"); body.pack(fill="both", expand=True)
+        body = tk.Frame(self, bg="#f1f5f9"); body.pack(fill="both", expand=True)
 
         # ── Sidebar ──
         sb_outer = tk.Frame(body, bg="#0f1724", width=220)
@@ -1725,34 +1734,63 @@ class App(tk.Frame):
     def _update_trm(self):
         self.lbl_trm_status.config(text="Consultando TRM...", fg="#f59e0b")
         def fetch():
-            trm = None
-            today = date.today().strftime("%Y-%m-%d")
-            # Intento 1: datos.gov.co
+            trm, fecha_trm = None, None
+            HEADERS = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                              "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "application/json",
+            }
+
+            # Intento 1: dataset oficial datos.gov.co (32sa-8pi3), retrocediendo hasta 10 días
+            # por si hoy es festivo/fin de semana y no hay TRM publicada.
             try:
-                url = (f"https://www.datos.gov.co/resource/mcec-87by.json"
-                       f"?$where=vigenciadesde>='{today}T00:00:00.000'&$limit=1&$order=vigenciadesde DESC")
-                req = urllib.request.Request(url, headers={"User-Agent":"Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=6) as r:
-                    data = json.loads(r.read())
-                if data and "valor" in data[0]:
-                    trm = float(str(data[0]["valor"]).replace(",","."))
-            except: pass
-            # Intento 2: si no hay TRM para hoy (fin de semana/festivo), buscar la más reciente
+                from datetime import timedelta
+                for offset in range(0, 10):
+                    d = (date.today() - timedelta(days=offset)).strftime("%Y-%m-%d")
+                    params = urllib.parse.urlencode({"vigenciadesde": d})
+                    url = f"https://www.datos.gov.co/resource/32sa-8pi3.json?{params}"
+                    req = urllib.request.Request(url, headers=HEADERS)
+                    with urllib.request.urlopen(req, timeout=6) as r:
+                        data = json.loads(r.read())
+                    if data and "valor" in data[0]:
+                        trm = float(str(data[0]["valor"]).replace(",", "."))
+                        fecha_trm = d
+                        break
+            except Exception:
+                pass
+
+            # Intento 2: dataset alterno mcec-87by con orden correcto (sin espacios crudos)
             if not trm:
                 try:
-                    url2 = "https://www.datos.gov.co/resource/mcec-87by.json?$limit=1&$order=vigenciadesde DESC"
-                    req2 = urllib.request.Request(url2, headers={"User-Agent":"Mozilla/5.0"})
+                    params2 = urllib.parse.urlencode({"$limit": "1", "$order": "vigenciadesde DESC"})
+                    url2 = f"https://www.datos.gov.co/resource/mcec-87by.json?{params2}"
+                    req2 = urllib.request.Request(url2, headers=HEADERS)
                     with urllib.request.urlopen(req2, timeout=6) as r2:
                         data2 = json.loads(r2.read())
                     if data2 and "valor" in data2[0]:
-                        trm = float(str(data2[0]["valor"]).replace(",","."))
-                        today = str(data2[0].get("vigenciadesde",""))[:10]
-                except: pass
+                        trm = float(str(data2[0]["valor"]).replace(",", "."))
+                        fecha_trm = str(data2[0].get("vigenciadesde",""))[:10]
+                except Exception:
+                    pass
+
+            # Intento 3: API pública de tipo de cambio (respaldo, no oficial DIAN pero útil)
+            if not trm:
+                try:
+                    req3 = urllib.request.Request("https://open.er-api.com/v6/latest/USD", headers=HEADERS)
+                    with urllib.request.urlopen(req3, timeout=6) as r3:
+                        data3 = json.loads(r3.read())
+                    cop = data3.get("rates", {}).get("COP")
+                    if cop:
+                        trm = float(cop)
+                        fecha_trm = date.today().strftime("%Y-%m-%d") + " (referencial)"
+                except Exception:
+                    pass
+
             if trm and trm > 0:
-                self.after(0, lambda t=trm, d=today: self._apply_trm(t, d))
+                self.after(0, lambda t=trm, d=fecha_trm: self._apply_trm(t, d))
             else:
                 self.after(0, lambda: self.lbl_trm_status.config(
-                    text="Sin conexión.\nIngrese TRM manualmente.", fg="#ef4444"))
+                    text="Sin conexión a internet.\nIngrese la TRM manualmente.", fg="#ef4444"))
         threading.Thread(target=fetch, daemon=True).start()
 
     def _apply_trm(self, trm, fecha):
@@ -2218,8 +2256,7 @@ class VentanaConfigAgencia(tk.Toplevel):
 
     def _activar(self):
         key = self.ent_lic.get().strip()
-        # Validate key: SHA256 of "DECLARAFACIL510" + first 8 chars of key
-        expected = hashlib.sha256(f"DECLARAFACIL510{key[:8]}".encode()).hexdigest()[:16].upper()
+        # Validación simple de formato: prefijo DF510- y longitud mínima.
         if key.upper().startswith("DF510-") and len(key) >= 20:
             db_exec("UPDATE config SET valor='1' WHERE clave='licencia_activa'")
             db_exec("UPDATE config SET valor=? WHERE clave='licencia_key'", (key,))
@@ -2563,12 +2600,11 @@ Nota: Este documento puede requerir autenticación notarial según el caso.
 
 if __name__ == "__main__":
     root = tk.Tk()
-    root.withdraw()  # Hide main window until login
+    root.withdraw()  # root stays hidden forever; App is its own Toplevel window
     init_db()
 
     def on_login(user, rol):
-        root.deiconify()
-        app = App(root, user, rol)
+        App(root, user, rol)
 
     def on_splash_ready():
         VentanaLogin(root, on_login)
