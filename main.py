@@ -2,6 +2,11 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from datetime import date, datetime, timedelta
 import os, sys, sqlite3, json, threading, urllib.request, urllib.parse, webbrowser, hashlib, random, string, shutil
+try:
+    import winreg
+    HAS_WINREG = True
+except ImportError:
+    HAS_WINREG = False
 
 try:
     import openpyxl
@@ -153,6 +158,89 @@ def calcular_dv(nit):
         if residuo == 1: return "1"
         return str(11 - residuo)
     except: return ""
+
+
+# ── Licenciamiento atado a hardware ──────────────────────────────────────────
+LICENSE_SECRET = "DeclaraFacil510-Jake2202-SecretoPrivado-NoCompartir"
+
+def get_machine_id():
+    """Genera un ID único y estable del equipo, basado en el volumen del disco
+    de Windows (C:) y el nombre del computador. No cambia entre reinicios."""
+    try:
+        import subprocess
+        vol_serial = ""
+        if sys.platform == "win32":
+            result = subprocess.run(["cmd","/c","vol","C:"], capture_output=True, text=True, timeout=5)
+            for line in result.stdout.splitlines():
+                if "Serial" in line or "Serie" in line:
+                    vol_serial = line.split()[-1]
+                    break
+        hostname = os.environ.get("COMPUTERNAME","") or os.environ.get("HOSTNAME","")
+        raw = f"{vol_serial}-{hostname}"
+        return hashlib.sha256(raw.encode()).hexdigest()[:12].upper()
+    except Exception:
+        # Fallback si algo falla: ID basado solo en hostname
+        hostname = os.environ.get("COMPUTERNAME","DESCONOCIDO")
+        return hashlib.sha256(hostname.encode()).hexdigest()[:12].upper()
+
+def generar_clave_licencia(machine_id):
+    """Genera la clave de activación correspondiente a un ID de máquina.
+    SOLO debe usarse desde el script generador del vendedor, nunca desde la app del cliente."""
+    firma = hashlib.sha256(f"{LICENSE_SECRET}-{machine_id}".encode()).hexdigest()[:16].upper()
+    return f"DF510-{machine_id}-{firma}"
+
+def validar_clave_licencia(clave, machine_id):
+    """Valida que una clave ingresada corresponda exactamente al ID de esta máquina."""
+    esperada = generar_clave_licencia(machine_id)
+    return clave.strip().upper() == esperada
+
+
+# ── Contador de uso persistente (resiste borrar la base de datos) ───────────
+# Se guarda en el Registro de Windows bajo HKEY_CURRENT_USER, fuera del
+# archivo .db, para que reinstalar o borrar la base de datos no reinicie
+# el conteo de declaraciones en modo prueba.
+REG_PATH = r"Software\DeclaraFacil510"
+
+def _reg_get(name, default=0):
+    if not HAS_WINREG:
+        return default
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_PATH)
+        val, _ = winreg.QueryValueEx(key, name)
+        winreg.CloseKey(key)
+        return int(val)
+    except FileNotFoundError:
+        return default
+    except Exception:
+        return default
+
+def _reg_set(name, value):
+    if not HAS_WINREG:
+        return
+    try:
+        key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, REG_PATH)
+        winreg.SetValueEx(key, name, 0, winreg.REG_DWORD, int(value))
+        winreg.CloseKey(key)
+    except Exception:
+        pass
+
+def incrementar_contador_uso():
+    """Suma 1 al contador persistente y devuelve el nuevo total."""
+    actual = _reg_get("decl_count", 0)
+    nuevo = actual + 1
+    _reg_set("decl_count", nuevo)
+    return nuevo
+
+def obtener_contador_uso():
+    """Devuelve el máximo entre lo guardado en el registro y lo que hay en la
+    base de datos actual — así, si alguien restaura un .db viejo con menos
+    declaraciones, igual prevalece el conteo real más alto ya usado."""
+    reg_count = _reg_get("decl_count", 0)
+    try:
+        db_count = db_fetch("SELECT COUNT(*) FROM declaraciones")[0][0]
+    except Exception:
+        db_count = 0
+    return max(reg_count, db_count)
 
 # ── PDF ───────────────────────────────────────────────────────────────────────
 def make_pdf(data, path):
@@ -1687,7 +1775,30 @@ class App(tk.Toplevel):
     def _abrir_historial(self):
         VentanaHistorial(self, self)
 
+    def _check_licencia(self):
+        """Verifica si la licencia está activa o si quedan usos en modo prueba.
+        Retorna True si puede continuar, False si debe bloquear la acción.
+        Usa el contador persistente del Registro de Windows, que NO se reinicia
+        aunque se borre la base de datos local."""
+        lic = db_fetch("SELECT valor FROM config WHERE clave='licencia_activa'")
+        activa = lic and lic[0][0] == "1"
+        if activa:
+            return True
+        max_t = db_fetch("SELECT valor FROM config WHERE clave='max_decl_trial'")
+        max_trial = int(max_t[0][0]) if max_t else 5
+        cnt = obtener_contador_uso()
+        if cnt >= max_trial:
+            messagebox.showwarning("Modo prueba agotado",
+                f"Ha alcanzado el límite de {max_trial} declaraciones en modo prueba.\n\n"
+                "Para continuar usando DeclaraFácil 510, active su licencia en:\n"
+                "⚙️ Configuración → Licencia\n\n"
+                "Contacto: bentjake15@gmail.com")
+            return False
+        return True
+
     def _guardar_decl(self):
+        if not self._check_licencia():
+            return
         if not self._cliente_id:
             # Try to find client by NIT already in form
             nit = self._get_field("nit").strip()
@@ -1728,6 +1839,7 @@ class App(tk.Toplevel):
             self._decl_id = db_exec(
                 "INSERT INTO declaraciones(cliente_id,numero,fecha,datos,total_cop,estado) VALUES(?,?,?,?,?,?)",
                 (self._cliente_id, doc_transp, fecha, json.dumps(data, ensure_ascii=False), total, "Borrador"))
+            incrementar_contador_uso()
         messagebox.showinfo("Guardado","✅ Declaración guardada en el historial.")
 
     # ── TRM ───────────────────────────────────────────────────────────────────
@@ -1867,6 +1979,8 @@ class App(tk.Toplevel):
 
     # ── PDF ───────────────────────────────────────────────────────────────────
     def _generate(self):
+        if not self._check_licencia():
+            return
         self._calc()
         errores = self._validar()
         if errores:
@@ -1906,6 +2020,8 @@ class App(tk.Toplevel):
 
     # ── EDI ──────────────────────────────────────────────────────────────────
     def _abrir_edi(self):
+        if not self._check_licencia():
+            return
         data = {k: self._get_field(k) for k in self.fields}
         try:
             fob=float(data.get("fob","0") or 0); flt=float(data.get("fletes","0") or 0)
@@ -2180,7 +2296,7 @@ class VentanaConfigAgencia(tk.Toplevel):
     def _build_licencia(self, parent):
         lic = db_fetch("SELECT valor FROM config WHERE clave='licencia_activa'")
         activa = lic[0][0] == "1" if lic else False
-        cnt = db_fetch("SELECT COUNT(*) FROM declaraciones")[0][0]
+        cnt = obtener_contador_uso()
         max_t = db_fetch("SELECT valor FROM config WHERE clave='max_decl_trial'")
         max_trial = int(max_t[0][0]) if max_t else 5
 
@@ -2191,9 +2307,23 @@ class VentanaConfigAgencia(tk.Toplevel):
                  bg="white", fg=estado_color).pack(pady=(20,8))
 
         if not activa:
-            tk.Label(parent, text=f"En modo prueba puede crear hasta {max_trial} declaraciones.\nIngrese su clave de activación para desbloquear.",
+            tk.Label(parent, text=f"En modo prueba puede crear hasta {max_trial} declaraciones.\nEnvíe el código de equipo de abajo para obtener su clave.",
                      font=("Arial",9), bg="white", fg="#64748b",
-                     justify="center").pack(pady=(0,16))
+                     justify="center").pack(pady=(0,12))
+
+        # ID de máquina — esto es lo que el cliente debe enviar al vendedor
+        mid = get_machine_id()
+        idf = tk.Frame(parent, bg="#f8fafc", highlightbackground="#e2e8f0", highlightthickness=1)
+        idf.pack(fill="x", padx=20, pady=(0,16))
+        tk.Label(idf, text="CÓDIGO DE ESTE EQUIPO (envíelo al proveedor)",
+                 font=("Arial",8,"bold"), bg="#f8fafc", fg="#94a3b8").pack(anchor="w", padx=10, pady=(8,2))
+        idrow = tk.Frame(idf, bg="#f8fafc"); idrow.pack(fill="x", padx=10, pady=(0,8))
+        tk.Label(idrow, text=mid, font=("Courier New",13,"bold"),
+                 bg="#f8fafc", fg="#1d4ed8").pack(side="left")
+        tk.Button(idrow, text="📋 Copiar", font=("Arial",8,"bold"), bg="#1d4ed8", fg="white",
+                  relief="flat", padx=8, pady=3, cursor="hand2",
+                  command=lambda: (self.clipboard_clear(), self.clipboard_append(mid))
+                  ).pack(side="right")
 
         tk.Label(parent, text="Clave de activación:", font=("Arial",10),
                  bg="white", fg="#475569").pack(padx=20, anchor="w")
@@ -2256,14 +2386,15 @@ class VentanaConfigAgencia(tk.Toplevel):
 
     def _activar(self):
         key = self.ent_lic.get().strip()
-        # Validación simple de formato: prefijo DF510- y longitud mínima.
-        if key.upper().startswith("DF510-") and len(key) >= 20:
+        mid = get_machine_id()
+        if validar_clave_licencia(key, mid):
             db_exec("UPDATE config SET valor='1' WHERE clave='licencia_activa'")
             db_exec("UPDATE config SET valor=? WHERE clave='licencia_key'", (key,))
-            messagebox.showinfo("Activado","✅ Licencia activada correctamente.\nReinicie la aplicación.")
+            messagebox.showinfo("Activado","✅ Licencia activada correctamente para este equipo.\nReinicie la aplicación.")
         else:
             messagebox.showerror("Clave inválida",
-                "La clave ingresada no es válida.\nContacte a bentjake15@gmail.com para obtener su clave.")
+                "La clave ingresada no corresponde a este equipo.\n\n"
+                "Envíe el CÓDIGO DE ESTE EQUIPO (arriba) a bentjake15@gmail.com para recibir la clave correcta.")
 
     def _nuevo_usuario(self):
         win = tk.Toplevel(self); win.title("Nuevo usuario")
