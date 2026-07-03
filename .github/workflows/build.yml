@@ -1,4 +1,4 @@
-name: Build Formulario510 EXE
+name: Build DeclaraFácil 510 — Instalador
 
 on:
   push:
@@ -17,17 +17,52 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
-          pip install reportlab openpyxl pyinstaller
+          pip install reportlab openpyxl customtkinter nuitka ordered-set zstandard
 
-      - name: Build EXE
+      - name: Build EXE with Nuitka
         run: |
-          pyinstaller --onefile --windowed --name "Formulario510" main.py
+          python -m nuitka --standalone --onefile --windows-console-mode=disable `
+            --enable-plugin=tk-inter `
+            --follow-imports `
+            --include-package=reportlab `
+            --include-package=openpyxl `
+            --include-package=customtkinter `
+            --include-data-dir=customtkinter=customtkinter `
+            --output-filename=Formulario510.exe `
+            --remove-output `
+            --assume-yes-for-downloads `
+            main.py
+        shell: pwsh
 
-      - name: Upload EXE
+      - name: Install NSIS
+        run: choco install nsis -y
+        shell: pwsh
+
+      - name: Create placeholder icon
+        run: |
+          if (-not (Test-Path "icon.ico")) {
+            [byte[]]$ico = @(0,0,1,0,1,0,16,16,0,0,1,0,32,0,104,4,0,0,22,0,0,0)
+            [System.IO.File]::WriteAllBytes("icon.ico", $ico)
+          }
+        shell: pwsh
+
+      - name: Build Installer with NSIS
+        run: |
+          & "C:\Program Files (x86)\NSIS\makensis.exe" installer.nsi
+        shell: pwsh
+
+      - name: Upload Installer
         uses: actions/upload-artifact@v4
         with:
-          name: Formulario510-Windows
-          path: dist/Formulario510.exe
+          name: DeclaraFacil510-Instalador
+          path: Instalador_DeclaraFacil510_v2.0.exe
+          retention-days: 30
+
+      - name: Upload EXE solo
+        uses: actions/upload-artifact@v4
+        with:
+          name: Formulario510-EXE-solo
+          path: Formulario510.exe
           retention-days: 30
