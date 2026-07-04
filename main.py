@@ -1,8 +1,432 @@
-# ── BACKEND (sin cambios) ──────────────────────────────────────────────────────
-import sys
-exec(open("/tmp/backend.py").read())
-# ── FIN BACKEND ───────────────────────────────────────────────────────────────
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+from datetime import date, datetime, timedelta
+import os, sys, sqlite3, json, threading, urllib.request, urllib.parse, webbrowser, hashlib, random, string, shutil
+try:
+    import winreg
+    HAS_WINREG = True
+except ImportError:
+    HAS_WINREG = False
 
+try:
+    import openpyxl
+    HAS_XLSX = True
+except ImportError:
+    HAS_XLSX = False
+
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.lib.units import mm
+from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
+                                 Paragraph, Spacer, HRFlowable)
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
+
+# ── Colors ───────────────────────────────────────────────────────────────────
+BLUE   = colors.HexColor("#1d4ed8")
+LBLUE  = colors.HexColor("#dbeafe")
+GRAY   = colors.HexColor("#f1f5f9")
+DGRAY  = colors.HexColor("#475569")
+BLACK  = colors.HexColor("#0f172a")
+WHITE  = colors.white
+BORDER = colors.HexColor("#cbd5e1")
+
+# ── DB path ───────────────────────────────────────────────────────────────────
+def get_app_data_dir():
+    """Retorna la carpeta de datos de la app en AppData/Local/DeclaraFacil510.
+    En Windows: C:\\Users\\USUARIO\\AppData\\Local\\DeclaraFacil510
+    En otros sistemas: carpeta del ejecutable (fallback).
+    Esta carpeta es invisible para el usuario normal y no ensucia el escritorio."""
+    if sys.platform == "win32":
+        appdata = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or ""
+        if appdata:
+            app_dir = os.path.join(appdata, "DeclaraFacil510")
+            os.makedirs(app_dir, exist_ok=True)
+            return app_dir
+    # Fallback para desarrollo o no-Windows
+    base = os.path.dirname(sys.executable) if getattr(sys,"frozen",False) else os.path.dirname(os.path.abspath(__file__))
+    return base
+
+def get_db_path():
+    return os.path.join(get_app_data_dir(), "formulario510.db")
+
+# ── Database ──────────────────────────────────────────────────────────────────
+def init_db():
+    conn = sqlite3.connect(get_db_path())
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS clientes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nit TEXT, dv TEXT, razon_social TEXT, direccion TEXT,
+        telefono TEXT, cod_seccional TEXT, cod_dpto TEXT, cod_municipio TEXT,
+        creado TEXT DEFAULT CURRENT_TIMESTAMP
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS declaraciones (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cliente_id INTEGER, numero TEXT, fecha TEXT,
+        datos TEXT, total_cop REAL, estado TEXT DEFAULT "Borrador",
+        pdf_path TEXT, fecha_levante TEXT, fecha_vencimiento TEXT,
+        creado TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(cliente_id) REFERENCES clientes(id)
+    )''')
+    # Add columns if upgrading from old DB
+    try:
+        c.execute("ALTER TABLE declaraciones ADD COLUMN fecha_levante TEXT")
+        c.execute("ALTER TABLE declaraciones ADD COLUMN fecha_vencimiento TEXT")
+        conn.commit()
+    except: pass
+    c.execute('''CREATE TABLE IF NOT EXISTS usuarios (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE, password_hash TEXT,
+        rol TEXT DEFAULT "operador", activo INTEGER DEFAULT 1,
+        creado TEXT DEFAULT CURRENT_TIMESTAMP
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS config (
+        clave TEXT PRIMARY KEY, valor TEXT
+    )''')
+    # Default admin user if none exists
+    c.execute("SELECT COUNT(*) FROM usuarios")
+    if c.fetchone()[0] == 0:
+        pwd = hashlib.sha256("admin123".encode()).hexdigest()
+        c.execute("INSERT INTO usuarios(username,password_hash,rol) VALUES(?,?,?)",
+                  ("admin", pwd, "admin"))
+    # Default config
+    for k,v in [("agencia_nombre","Mi Agencia de Aduanas"),
+                ("agencia_nit",""),("agencia_tel",""),
+                ("agencia_dir",""),("licencia_key",""),
+                ("licencia_activa","0"),("max_decl_trial","5")]:
+        c.execute("INSERT OR IGNORE INTO config(clave,valor) VALUES(?,?)",(k,v))
+    conn.commit(); conn.close()
+
+def db_exec(sql, params=()):
+    conn = sqlite3.connect(get_db_path())
+    c = conn.cursor(); c.execute(sql, params); conn.commit()
+    last = c.lastrowid; conn.close(); return last
+
+def db_fetch(sql, params=()):
+    conn = sqlite3.connect(get_db_path())
+    c = conn.cursor(); c.execute(sql, params)
+    rows = c.fetchall(); conn.close(); return rows
+
+# ── Excel map ─────────────────────────────────────────────────────────────────
+EXCEL_MAP = {
+    "nit":"B5","dv":"D5","razonSocial":"B6","direccion":"B7","telefono":"D7",
+    "codSeccional":"B8","codDpto":"D8","codMunicipio":"B9",
+    "nitDecl":"B12","dvDecl":"D12","razonDecl":"B13","tipoUsuario":"D13",
+    "nombresDecl":"B14","numDocDecl":"D14","codUsuario":"B15",
+    "tipoDecl":"B18","numFormAnterior":"D18",
+    "manifestoCarga":"B19","fechaLlegada":"D19",
+    "codLugarIngreso":"B20","codModo":"D20",
+    "docTransporte":"B21","fechaDocTransporte":"D21",
+    "codProcedencia":"B22","tasaCambio":"D22",
+    "nombreExportador":"B25","formaPago":"D25",
+    "codPaisCompra":"B26","codPaisOrigen":"D26",
+    "subpartida":"B27","numBultos":"D27",
+    "cantidad":"B28","pesoBruto":"D28",
+    "pesoNeto":"B29","fob":"D29",
+    "fletes":"B30","seguros":"D30",
+    "otrosGastos":"B31","ajuste":"D31",
+    "descripcion":"B32",
+    "arancelPct":"B35","ivaPct":"D35","icPct":"B36",
+}
+
+SUBPARTIDAS = [
+    ("Smartphones / Celulares",    "8517.13.00.00", "0",  "19"),
+    ("Tablets",                    "8471.30.00.00", "0",  "19"),
+    ("Laptops / Computadores",     "8471.30.00.00", "0",  "19"),
+    ("Computadores escritorio",    "8471.41.00.00", "0",  "19"),
+    ("Audífonos / Auriculares",    "8518.30.00.00", "15", "19"),
+    ("Cámaras fotográficas",       "9006.53.00.00", "15", "19"),
+    ("Relojes de pulsera",         "9102.11.00.00", "15", "19"),
+    ("Consolas videojuegos",       "9504.50.00.00", "15", "19"),
+    ("Accesorios electrónicos",    "8544.42.00.00", "15", "19"),
+    ("Ropa exterior hombre",       "6203.42.00.00", "40", "19"),
+    ("Ropa exterior mujer",        "6204.62.00.00", "40", "19"),
+    ("Calzado deportivo",          "6404.11.00.00", "40", "19"),
+    ("Bolsos / Maletines",         "4202.12.00.00", "15", "19"),
+    ("Perfumes / Cosméticos",      "3303.00.10.00", "15", "19"),
+    ("Suplementos vitamínicos",    "2106.90.72.00", "15", "19"),
+    ("Libros impresos",            "4901.99.00.00", "0",  "0"),
+    ("Juguetes",                   "9503.00.90.00", "15", "19"),
+    ("Motos hasta 185cc",          "8711.20.00.00", "0",  "19"),
+    ("Motos más de 185cc",         "8711.40.00.00", "35", "19"),
+    ("Autos hasta 1400cc",         "8703.22.90.00", "35", "19"),
+    ("Autos 1400-2000cc",          "8703.23.90.00", "35", "19"),
+    ("Vehículos eléctricos",       "8703.80.10.00", "5",  "19"),
+]
+
+def fmt_cop(n):
+    try: return f"${int(round(float(n))):,}".replace(",",".")
+    except: return "$0"
+
+def calcular_dv(nit):
+    """Calcula el dígito de verificación del NIT colombiano (algoritmo oficial DIAN,
+    módulo 11). Los pesos se aplican de derecha a izquierda: 3,7,13,17,19,23,29,37,41,43,47,53,59,67,71."""
+    try:
+        nit_str = str(nit).strip().replace(".","").replace("-","")
+        if not nit_str.isdigit() or not nit_str: return ""
+        factores = [3,7,13,17,19,23,29,37,41,43,47,53,59,67,71]
+        digitos_invertidos = nit_str[::-1]
+        total = sum(int(d) * factores[i] for i, d in enumerate(digitos_invertidos) if i < len(factores))
+        residuo = total % 11
+        if residuo == 0: return "0"
+        if residuo == 1: return "1"
+        return str(11 - residuo)
+    except: return ""
+
+
+# ── Licenciamiento atado a hardware ──────────────────────────────────────────
+LICENSE_SECRET = "DeclaraFacil510-Jake2202-SecretoPrivado-NoCompartir"
+
+def get_machine_id():
+    """Genera un ID único y estable del equipo, basado en el volumen del disco
+    de Windows (C:) y el nombre del computador. No cambia entre reinicios."""
+    try:
+        import subprocess
+        vol_serial = ""
+        if sys.platform == "win32":
+            result = subprocess.run(["cmd","/c","vol","C:"], capture_output=True, text=True, timeout=5)
+            for line in result.stdout.splitlines():
+                if "Serial" in line or "Serie" in line:
+                    vol_serial = line.split()[-1]
+                    break
+        hostname = os.environ.get("COMPUTERNAME","") or os.environ.get("HOSTNAME","")
+        raw = f"{vol_serial}-{hostname}"
+        return hashlib.sha256(raw.encode()).hexdigest()[:12].upper()
+    except Exception:
+        # Fallback si algo falla: ID basado solo en hostname
+        hostname = os.environ.get("COMPUTERNAME","DESCONOCIDO")
+        return hashlib.sha256(hostname.encode()).hexdigest()[:12].upper()
+
+def generar_clave_licencia(machine_id):
+    """Genera la clave de activación correspondiente a un ID de máquina.
+    SOLO debe usarse desde el script generador del vendedor, nunca desde la app del cliente."""
+    firma = hashlib.sha256(f"{LICENSE_SECRET}-{machine_id}".encode()).hexdigest()[:16].upper()
+    return f"DF510-{machine_id}-{firma}"
+
+def validar_clave_licencia(clave, machine_id):
+    """Valida que una clave ingresada corresponda exactamente al ID de esta máquina."""
+    esperada = generar_clave_licencia(machine_id)
+    return clave.strip().upper() == esperada
+
+
+# ── Contador de uso persistente (resiste borrar la base de datos) ───────────
+# Se guarda en el Registro de Windows bajo HKEY_CURRENT_USER, fuera del
+# archivo .db, para que reinstalar o borrar la base de datos no reinicie
+# el conteo de declaraciones en modo prueba.
+REG_PATH = r"Software\DeclaraFacil510"
+
+def _reg_get(name, default=0):
+    if not HAS_WINREG:
+        return default
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_PATH)
+        val, _ = winreg.QueryValueEx(key, name)
+        winreg.CloseKey(key)
+        return int(val)
+    except FileNotFoundError:
+        return default
+    except Exception:
+        return default
+
+def _reg_set(name, value):
+    if not HAS_WINREG:
+        return
+    try:
+        key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, REG_PATH)
+        winreg.SetValueEx(key, name, 0, winreg.REG_DWORD, int(value))
+        winreg.CloseKey(key)
+    except Exception:
+        pass
+
+def incrementar_contador_uso():
+    """Suma 1 al contador persistente y devuelve el nuevo total."""
+    actual = _reg_get("decl_count", 0)
+    nuevo = actual + 1
+    _reg_set("decl_count", nuevo)
+    return nuevo
+
+def obtener_contador_uso():
+    """Devuelve el máximo entre lo guardado en el registro y lo que hay en la
+    base de datos actual — así, si alguien restaura un .db viejo con menos
+    declaraciones, igual prevalece el conteo real más alto ya usado."""
+    reg_count = _reg_get("decl_count", 0)
+    try:
+        db_count = db_fetch("SELECT COUNT(*) FROM declaraciones")[0][0]
+    except Exception:
+        db_count = 0
+    return max(reg_count, db_count)
+
+# ── PDF ───────────────────────────────────────────────────────────────────────
+def make_pdf(data, path):
+    doc = SimpleDocTemplate(path, pagesize=A4,
+                            topMargin=14*mm, bottomMargin=14*mm,
+                            leftMargin=14*mm, rightMargin=14*mm)
+    story = []
+    s_title = ParagraphStyle("t", fontName="Helvetica-Bold", fontSize=15, textColor=BLUE, spaceAfter=2)
+    s_sub   = ParagraphStyle("s", fontName="Helvetica",      fontSize=8,  textColor=DGRAY, spaceAfter=8)
+    s_sec   = ParagraphStyle("sc",fontName="Helvetica-Bold", fontSize=7,  textColor=BLUE, spaceBefore=10, spaceAfter=4, leading=10)
+    s_lbl   = ParagraphStyle("l", fontName="Helvetica",      fontSize=7,  textColor=DGRAY)
+    s_val   = ParagraphStyle("v", fontName="Helvetica-Bold", fontSize=9,  textColor=BLACK)
+    s_total = ParagraphStyle("to",fontName="Helvetica-Bold", fontSize=13, textColor=BLUE, alignment=TA_RIGHT)
+    s_foot  = ParagraphStyle("f", fontName="Helvetica-Oblique", fontSize=7, textColor=DGRAY, alignment=TA_CENTER)
+
+    hd = Table([[Paragraph("Formulario <font color='#1d4ed8'>510</font>", s_title),
+                 Paragraph(f"Año: <b>{date.today().year}</b>", s_val)]],
+               colWidths=[120*mm, 60*mm])
+    hd.setStyle(TableStyle([("ALIGN",(1,0),(1,0),"RIGHT"),("VALIGN",(0,0),(-1,-1),"MIDDLE")]))
+    story.append(hd)
+    story.append(Paragraph("Declaración de Importación Simplificada Privada · DIAN Colombia", s_sub))
+    story.append(HRFlowable(width="100%", thickness=1.5, color=BLUE, spaceAfter=10))
+
+    def section(title, rows):
+        story.append(Paragraph(title, s_sec))
+        cw = [45*mm, 45*mm, 45*mm, 47*mm]
+        tdata, row = [], []
+        for lbl, val in rows:
+            row.append([Paragraph(lbl, s_lbl), Paragraph(str(val) if val else "—", s_val)])
+            if len(row) == 4:
+                tdata.append(row); row = []
+        if row:
+            while len(row) < 4: row.append([Paragraph("", s_lbl), Paragraph("", s_val)])
+            tdata.append(row)
+        if not tdata: return
+        t = Table(tdata, colWidths=cw, hAlign="LEFT")
+        t.setStyle(TableStyle([
+            ("ROWBACKGROUNDS",(0,0),(-1,-1),[WHITE,GRAY]),
+            ("BOX",(0,0),(-1,-1),0.5,BORDER),("INNERGRID",(0,0),(-1,-1),0.3,BORDER),
+            ("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4),
+            ("LEFTPADDING",(0,0),(-1,-1),6),("VALIGN",(0,0),(-1,-1),"TOP"),
+        ]))
+        story.append(t); story.append(Spacer(1,4))
+
+    section("01 — Importador", [
+        ("NIT", data.get("nit","")+"-"+data.get("dv","")),
+        ("Razón social", data.get("razonSocial","")),
+        ("Dirección", data.get("direccion","")),
+        ("Teléfono", data.get("telefono","")),
+        ("Cód. Seccional", data.get("codSeccional","")),
+        ("Cód. Departamento", data.get("codDpto","")),
+        ("Cód. Municipio", data.get("codMunicipio","")),
+    ])
+    section("02 — Declarante", [
+        ("NIT Declarante", data.get("nitDecl","")+"-"+data.get("dvDecl","")),
+        ("Razón social", data.get("razonDecl","")),
+        ("Tipo usuario", data.get("tipoUsuario","")),
+        ("No. documento", data.get("numDocDecl","")),
+        ("Nombres", data.get("nombresDecl","")),
+    ])
+    section("03 — Transporte", [
+        ("Tipo declaración", data.get("tipoDecl","")),
+        ("Manifiesto carga", data.get("manifestoCarga","")),
+        ("Fecha llegada", data.get("fechaLlegada","")),
+        ("Lugar ingreso", data.get("codLugarIngreso","")),
+        ("Doc. transporte", data.get("docTransporte","")),
+        ("Fecha doc.", data.get("fechaDocTransporte","")),
+        ("Modo transporte", data.get("codModo","")),
+        ("País procedencia", data.get("codProcedencia","")),
+        ("Tasa de cambio", data.get("tasaCambio","")+" COP/USD"),
+    ])
+    section("04 — Mercancía", [
+        ("Proveedor", data.get("nombreExportador","")),
+        ("País compra", data.get("codPaisCompra","")),
+        ("País origen", data.get("codPaisOrigen","")),
+        ("Forma de pago", data.get("formaPago","")),
+        ("Subpartida", data.get("subpartida","")),
+        ("No. bultos", data.get("numBultos","")),
+        ("Cantidad", data.get("cantidad","")),
+        ("Peso bruto (kg)", data.get("pesoBruto","")),
+        ("Peso neto (kg)", data.get("pesoNeto","")),
+        ("FOB (USD)", "$"+data.get("fob","")),
+        ("Fletes (USD)", "$"+data.get("fletes","")),
+        ("Seguros (USD)", "$"+data.get("seguros","")),
+        ("Otros gastos (USD)", "$"+data.get("otrosGastos","")),
+        ("Valor Aduana CIF", "$"+data.get("valorAduana","")+" USD"),
+    ])
+    story.append(Paragraph("Descripción de las Mercancías (Cas. 68)", s_sec))
+    dt = Table([[Paragraph(data.get("descripcion","—"), s_val)]], colWidths=[182*mm])
+    dt.setStyle(TableStyle([("BOX",(0,0),(-1,-1),0.5,BORDER),("BACKGROUND",(0,0),(-1,-1),WHITE),
+                             ("TOPPADDING",(0,0),(-1,-1),6),("BOTTOMPADDING",(0,0),(-1,-1),6),
+                             ("LEFTPADDING",(0,0),(-1,-1),8)]))
+    story.append(dt); story.append(Spacer(1,6))
+
+    story.append(Paragraph("05 — Liquidación Tributaria", s_sec))
+    fob=float(data.get("fob","0") or 0); flt=float(data.get("fletes","0") or 0)
+    seg=float(data.get("seguros","0") or 0); otr=float(data.get("otrosGastos","0") or 0)
+    adj=float(data.get("ajuste","0") or 0); trm=float(data.get("tasaCambio","4150") or 4150)
+    ap=float(data.get("arancelPct","0") or 0); ip=float(data.get("ivaPct","19") or 19)
+    icp=float(data.get("icPct","0") or 0)
+    cif=fob+flt+seg+otr+adj; cifC=cif*trm; araC=cifC*(ap/100)
+    ivaC=(cifC+araC)*(ip/100); icC=cifC*(icp/100); total=araC+ivaC+icC
+
+    def lr(label, val, bold=False, blue=False):
+        ls = ParagraphStyle("lr", fontName="Helvetica-Bold" if bold else "Helvetica",
+                             fontSize=9, textColor=BLUE if blue else (BLACK if bold else DGRAY))
+        vs = ParagraphStyle("vr", fontName="Helvetica-Bold" if bold else "Helvetica",
+                             fontSize=9 if not blue else 13,
+                             textColor=BLUE if blue else (BLACK if bold else DGRAY), alignment=TA_RIGHT)
+        return [Paragraph(label, ls), Paragraph(val, vs)]
+
+    liq = [
+        lr(f"FOB", f"${fob:.2f} USD"), lr(f"+ Fletes", f"${flt:.2f} USD"),
+        lr(f"+ Seguros", f"${seg:.2f} USD"), lr(f"+ Otros gastos", f"${otr:.2f} USD"),
+        lr(f"+/- Ajuste", f"${adj:.2f} USD"),
+        lr(f"Valor Aduana CIF", f"${cif:.2f} USD = {fmt_cop(cifC)} COP", bold=True),
+        lr(f"Arancel ({ap}%)", f"{fmt_cop(araC)} COP"),
+        lr(f"IVA ({ip}%) sobre CIF + Arancel", f"{fmt_cop(ivaC)} COP"),
+        lr(f"Impuesto al consumo ({icp}%)", f"{fmt_cop(icC)} COP"),
+        lr("TOTAL LIQUIDADO (Cas. 93)", f"{fmt_cop(total)} COP", bold=True, blue=True),
+    ]
+    lt = Table(liq, colWidths=[130*mm, 52*mm])
+    lt.setStyle(TableStyle([
+        ("BOX",(0,0),(-1,-1),0.5,BORDER),("INNERGRID",(0,0),(-1,-1),0.3,BORDER),
+        ("ROWBACKGROUNDS",(0,0),(-1,-1),[WHITE,GRAY]),
+        ("BACKGROUND",(0,9),(1,9),LBLUE),("BACKGROUND",(0,5),(1,5),GRAY),
+        ("TOPPADDING",(0,0),(-1,-1),5),("BOTTOMPADDING",(0,0),(-1,-1),5),
+        ("LEFTPADDING",(0,0),(-1,-1),8),("RIGHTPADDING",(0,0),(-1,-1),8),
+    ]))
+    story.append(lt); story.append(Spacer(1,8))
+
+    ct_data = [
+        [Paragraph("Casilla 72 — Total Arancel $", s_lbl),
+         Paragraph("Casilla 76 — Total IVA $", s_lbl),
+         Paragraph("Casilla 980 — Pago total $", s_lbl)],
+        [Paragraph(fmt_cop(araC), s_total),
+         Paragraph(fmt_cop(ivaC), s_total),
+         Paragraph(fmt_cop(total), s_total)],
+    ]
+    ct = Table(ct_data, colWidths=[60*mm, 60*mm, 62*mm])
+    ct.setStyle(TableStyle([
+        ("BOX",(0,0),(-1,-1),1.5,BLUE),("INNERGRID",(0,0),(-1,-1),0.5,BORDER),
+        ("BACKGROUND",(0,0),(-1,-1),LBLUE),
+        ("TOPPADDING",(0,0),(-1,-1),8),("BOTTOMPADDING",(0,0),(-1,-1),8),
+        ("LEFTPADDING",(0,0),(-1,-1),10),("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+    ]))
+    story.append(ct); story.append(Spacer(1,16))
+    firma_data = [
+        [Paragraph("Firma del declarante", s_lbl), Paragraph("Nombre completo", s_lbl), Paragraph("C.C. No.", s_lbl)],
+        [Paragraph("_______________________", s_val), Paragraph("_______________________", s_val), Paragraph("_______________________", s_val)],
+    ]
+    ft = Table(firma_data, colWidths=[60*mm, 60*mm, 62*mm])
+    ft.setStyle(TableStyle([
+        ("TOPPADDING",(0,0),(-1,-1),6),("BOTTOMPADDING",(0,0),(-1,-1),6),
+        ("LEFTPADDING",(0,0),(-1,-1),6),("VALIGN",(0,0),(-1,-1),"BOTTOM"),
+        ("BOX",(0,0),(-1,-1),0.5,BORDER),("INNERGRID",(0,0),(-1,-1),0.3,BORDER),
+    ]))
+    story.append(ft); story.append(Spacer(1,8))
+    story.append(HRFlowable(width="100%", thickness=0.5, color=BORDER)); story.append(Spacer(1,4))
+    story.append(Paragraph(
+        f"Pre-diligenciamiento de referencia · No reemplaza declaración oficial ante la DIAN · "
+        f"Generado el {date.today().strftime('%d/%m/%Y')}", s_foot))
+    doc.build(story)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VENTANA: Gestión de Clientes
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════════════════
+# INTERFAZ — CustomTkinter (dark theme profesional)
+# ══════════════════════════════════════════════════════════════════
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
 import tkinter as tk
@@ -1219,43 +1643,6 @@ class FormCliente(tk.Toplevel):
         self.destroy()
 
 
-# ── Las demás ventanas secundarias (Historial, ROP, EDI, etc.) se importan
-# del archivo original que ya funciona correctamente ──────────────────────────
-_orig = open("/home/claude/formulario510_exe/main.py").read()
-
-# Extract each secondary window class from original
-import types
-_ns = {
-    "tk":tk,"ttk":ttk,"messagebox":messagebox,"filedialog":filedialog,
-    "date":date,"datetime":datetime,"timedelta":timedelta,
-    "os":os,"sys":sys,"json":json,"threading":threading,
-    "hashlib":hashlib,"shutil":shutil,"webbrowser":webbrowser,
-    "urllib":urllib,"db_fetch":db_fetch,"db_exec":db_exec,
-    "fmt_cop":fmt_cop,"get_machine_id":get_machine_id,
-    "get_app_data_dir":get_app_data_dir,"get_db_path":get_db_path,
-    "calcular_dv":calcular_dv,"generar_clave_licencia":generar_clave_licencia,
-    "validar_clave_licencia":validar_clave_licencia,
-    "incrementar_contador_uso":incrementar_contador_uso,
-    "obtener_contador_uso":obtener_contador_uso,
-    "make_pdf":make_pdf,"init_db":init_db,
-    "HAS_WINREG":HAS_WINREG,"HAS_XLSX":HAS_XLSX,
-    "SUBPARTIDAS":SUBPARTIDAS,"PAISES":PAISES,
-    "BG":BG,"BG2":BG2,"BG3":BG3,"BORDER":BORDER,"TEXT":TEXT,"TEXT2":TEXT2,
-    "BLUE":BLUE,"BLUE_DK":BLUE_DK,"GREEN":GREEN,"RED":RED,"YELLOW":YELLOW,
-    "LICENSE_SECRET":LICENSE_SECRET,
-}
-
-for cls_name in ["VentanaHistorial","VentanaChecklist","VentanaPlazos",
-                  "VentanaROP","VentanaEDI","VentanaConsultaLevante",
-                  "VentanaEntregaUrgente","VentanaConfigAgencia",
-                  "VentanaEstadisticas","VentanaMultas","VentanaPoder"]:
-    start = _orig.find(f"\nclass {cls_name}")
-    nxt = _orig.find("\nclass ", start+1)
-    code = _orig[start:nxt if nxt>0 else len(_orig)]
-    exec(code, _ns)
-    globals()[cls_name] = _ns[cls_name]
-
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # ENTRY POINT
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1272,3 +1659,1314 @@ if __name__ == "__main__":
 
     SplashScreen(root, on_splash_ready)
     root.mainloop()
+
+
+# ══════════════════════════════════════════════════════════════════
+# VENTANAS SECUNDARIAS (heredadas, funcionales)
+# ══════════════════════════════════════════════════════════════════
+
+class VentanaHistorial(tk.Toplevel):
+    def __init__(self, parent, app_ref):
+        super().__init__(parent)
+        self.app = app_ref
+        self.title("Historial de Declaraciones")
+        self.geometry("1000x580")
+        self.configure(bg="white")
+        self._build()
+        self._cargar()
+
+    def _build(self):
+        hdr = tk.Frame(self, bg="#1d4ed8", height=48)
+        hdr.pack(fill="x"); hdr.pack_propagate(False)
+        tk.Label(hdr, text="📋  Historial de Declaraciones",
+                 font=("Arial",13,"bold"), bg="#1d4ed8", fg="white").pack(side="left", padx=16, pady=10)
+
+        tb = tk.Frame(self, bg="#f8fafc", height=46); tb.pack(fill="x"); tb.pack_propagate(False)
+        for text, cmd, bg in [
+            ("📂 Abrir",    self._abrir,    "#0f766e"),
+            ("🗑️ Eliminar", self._eliminar, "#dc2626"),
+            ("📄 Ver PDF",  self._ver_pdf,  "#7c3aed"),
+        ]:
+            tk.Button(tb, text=text, font=("Arial",10,"bold"), bg=bg, fg="white",
+                      relief="flat", padx=12, pady=6, cursor="hand2",
+                      command=cmd).pack(side="left", padx=(8,2), pady=6)
+
+        # Filtro cliente
+        ff = tk.Frame(tb, bg="#f8fafc"); ff.pack(side="right", padx=12, pady=8)
+        tk.Label(ff, text="Cliente:", bg="#f8fafc", font=("Arial",10)).pack(side="left", padx=(0,4))
+        self.filtro_var = tk.StringVar(value="Todos")
+        self.filtro_cb = ttk.Combobox(ff, textvariable=self.filtro_var, font=("Arial",10),
+                                       state="readonly", width=24)
+        self.filtro_cb.pack(side="left")
+        self.filtro_cb.bind("<<ComboboxSelected>>", lambda e: self._cargar())
+        self._actualizar_filtro()
+
+        cols = ("ID","Fecha","Cliente","NIT","No. Doc. Transporte","Total COP","Estado")
+        self.tree = ttk.Treeview(self, columns=cols, show="headings", height=20)
+        widths = {"ID":40,"Fecha":90,"Cliente":260,"NIT":110,"No. Doc. Transporte":160,"Total COP":110,"Estado":80}
+        for c in cols:
+            self.tree.heading(c, text=c)
+            self.tree.column(c, width=widths[c], anchor="w")
+        sb = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self.tree.pack(fill="both", expand=True, padx=8, pady=8)
+        self.tree.bind("<Double-1>", lambda e: self._abrir())
+
+    def _actualizar_filtro(self):
+        clientes = db_fetch("SELECT razon_social FROM clientes ORDER BY razon_social")
+        vals = ["Todos"] + [r[0] for r in clientes]
+        self.filtro_cb["values"] = vals
+
+    def _cargar(self):
+        filtro = self.filtro_var.get()
+        if filtro == "Todos":
+            rows = db_fetch("""SELECT d.id, d.fecha, c.razon_social, c.nit, d.numero, d.total_cop, d.estado
+                               FROM declaraciones d JOIN clientes c ON d.cliente_id=c.id
+                               ORDER BY d.creado DESC""")
+        else:
+            rows = db_fetch("""SELECT d.id, d.fecha, c.razon_social, c.nit, d.numero, d.total_cop, d.estado
+                               FROM declaraciones d JOIN clientes c ON d.cliente_id=c.id
+                               WHERE c.razon_social=? ORDER BY d.creado DESC""", (filtro,))
+        self.tree.delete(*self.tree.get_children())
+        for r in rows:
+            total = fmt_cop(r[5]) if r[5] else "$0"
+            self.tree.insert("", "end", values=(r[0],r[1],r[2],r[3],r[4] or "—",total,r[6]))
+
+    def _get_sel_id(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("Aviso","Seleccione una declaración."); return None
+        return self.tree.item(sel[0])["values"][0]
+
+    def _abrir(self):
+        did = self._get_sel_id()
+        if not did: return
+        row = db_fetch("SELECT datos FROM declaraciones WHERE id=?", (did,))
+        if not row: return
+        data = json.loads(row[0][0])
+        self.app._cargar_datos(data)
+        self.app._decl_id = did
+        self.destroy()
+        messagebox.showinfo("Cargado","✅ Declaración cargada en el formulario.")
+
+    def _eliminar(self):
+        did = self._get_sel_id()
+        if not did: return
+        if messagebox.askyesno("Confirmar","¿Eliminar esta declaración?"):
+            db_exec("DELETE FROM declaraciones WHERE id=?", (did,))
+            self._cargar()
+
+    def _ver_pdf(self):
+        did = self._get_sel_id()
+        if not did: return
+        row = db_fetch("SELECT pdf_path FROM declaraciones WHERE id=?", (did,))
+        if row and row[0][0] and os.path.exists(row[0][0]):
+            os.startfile(row[0][0])
+        else:
+            messagebox.showinfo("Sin PDF","No hay PDF guardado para esta declaración.")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VENTANA: Checklist de Documentos Soporte
+# ═══════════════════════════════════════════════════════════════════════════════
+DOCUMENTOS_BASE = [
+    ("Factura comercial del proveedor",              True),
+    ("Lista de empaque (Packing list)",              True),
+    ("Documento de transporte (AWB / BL / Guía)",   True),
+    ("Declaración de importación Formulario 510",    True),
+    ("Recibo Oficial de Pago (ROP)",                 True),
+    ("Poder o autorización del importador",          False),
+    ("Registro de importación (si aplica)",          False),
+    ("Visto bueno INVIMA (medicamentos/alimentos)",  False),
+    ("Visto bueno ICA (productos agropecuarios)",    False),
+    ("Visto bueno Min. Transporte (vehículos)",      False),
+    ("Certificado de origen (si aplica TLC)",        False),
+    ("Garantía / Fianza (mercancía restringida)",    False),
+    ("Foto de la mercancía (si lo exige el aforo)",  False),
+]
+
+
+class VentanaChecklist(tk.Toplevel):
+    def __init__(self, parent, decl_info=""):
+        super().__init__(parent)
+        self.title("Checklist — Documentos Soporte")
+        self.geometry("560x580")
+        self.configure(bg="white")
+        self.vars = []
+        self._build(decl_info)
+
+    def _build(self, decl_info):
+        tk.Frame(self, bg="#1d4ed8", height=4).pack(fill="x")
+        tk.Label(self, text="✅  Checklist de Documentos Soporte",
+                 font=("Arial",13,"bold"), bg="white", fg="#1d4ed8").pack(pady=(14,2))
+        if decl_info:
+            tk.Label(self, text=decl_info, font=("Arial",9),
+                     bg="white", fg="#64748b").pack(pady=(0,8))
+
+        frame = tk.Frame(self, bg="white"); frame.pack(fill="both", expand=True, padx=20)
+
+        tk.Label(frame, text="Marque los documentos que ya tiene listos:",
+                 font=("Arial",10), bg="white", fg="#475569").pack(anchor="w", pady=(0,10))
+
+        for doc, obligatorio in DOCUMENTOS_BASE:
+            row = tk.Frame(frame, bg="white"); row.pack(fill="x", pady=3)
+            var = tk.BooleanVar(value=obligatorio)
+            self.vars.append((var, doc, obligatorio))
+            color = "#dc2626" if obligatorio else "#64748b"
+            tag = " ★" if obligatorio else ""
+            cb = tk.Checkbutton(row, text=doc+tag, variable=var,
+                                font=("Arial",10), bg="white", fg=color,
+                                activebackground="white", cursor="hand2",
+                                selectcolor="#dbeafe")
+            cb.pack(side="left")
+
+        tk.Label(frame, text="★ = Documento obligatorio siempre",
+                 font=("Arial",8), bg="white", fg="#94a3b8").pack(anchor="w", pady=(8,0))
+
+        # Progress bar
+        self.lbl_progress = tk.Label(self, text="", font=("Arial",10,"bold"),
+                                      bg="white", fg="#1d4ed8")
+        self.lbl_progress.pack(pady=4)
+        self._update_progress()
+        for var,_,_ in self.vars:
+            var.trace("w", lambda *a: self._update_progress())
+
+        btns = tk.Frame(self, bg="white"); btns.pack(fill="x", padx=20, pady=(4,16))
+        tk.Button(btns, text="🖨️  Imprimir checklist", font=("Arial",10,"bold"),
+                  bg="#1d4ed8", fg="white", relief="flat", pady=8, cursor="hand2",
+                  command=self._imprimir).pack(side="left", fill="x", expand=True, padx=(0,4))
+        tk.Button(btns, text="Cerrar", font=("Arial",10), bg="#f1f5f9", fg="#64748b",
+                  relief="flat", pady=8, cursor="hand2",
+                  command=self.destroy).pack(side="left", fill="x", expand=True)
+
+    def _update_progress(self):
+        total = len(self.vars); marcados = sum(1 for v,_,_ in self.vars if v.get())
+        oblig_total = sum(1 for _,_,o in self.vars if o)
+        oblig_ok = sum(1 for v,_,o in self.vars if o and v.get())
+        color = "#22c55e" if oblig_ok == oblig_total else "#f59e0b"
+        self.lbl_progress.config(
+            text=f"{marcados}/{total} documentos listos  |  Obligatorios: {oblig_ok}/{oblig_total}",
+            fg=color)
+
+    def _imprimir(self):
+        lines = ["CHECKLIST DOCUMENTOS SOPORTE — FORMULARIO 510", "="*50, ""]
+        for var, doc, oblig in self.vars:
+            estado = "[X]" if var.get() else "[ ]"
+            tag = " (OBLIGATORIO)" if oblig else ""
+            lines.append(f"{estado} {doc}{tag}")
+        lines += ["","Fecha: "+date.today().strftime("%d/%m/%Y")]
+        txt = "\n".join(lines)
+        import tempfile, os
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
+                                          delete=False, encoding="utf-8")
+        tmp.write(txt); tmp.close()
+        os.startfile(tmp.name)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VENTANA: Control de Plazos
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class VentanaPlazos(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Control de Plazos y Alertas")
+        self.geometry("860x520")
+        self.configure(bg="white")
+        self._build()
+        self._cargar()
+
+    def _build(self):
+        hdr = tk.Frame(self, bg="#1d4ed8", height=48); hdr.pack(fill="x"); hdr.pack_propagate(False)
+        tk.Label(hdr, text="⏰  Control de Plazos — Declaraciones",
+                 font=("Arial",13,"bold"), bg="#1d4ed8", fg="white").pack(side="left", padx=16, pady=10)
+
+        # Info
+        info = tk.Frame(self, bg="#fef9c3"); info.pack(fill="x")
+        tk.Label(info, text="⚠️  Plazo legal: máximo 2 meses desde el levante para presentar la declaración formal.",
+                 font=("Arial",9), bg="#fef9c3", fg="#92400e").pack(padx=16, pady=6)
+
+        # Toolbar
+        tb = tk.Frame(self, bg="#f8fafc", height=46); tb.pack(fill="x"); tb.pack_propagate(False)
+        tk.Button(tb, text="📅 Registrar levante", font=("Arial",10,"bold"),
+                  bg="#0f766e", fg="white", relief="flat", padx=12, pady=6,
+                  cursor="hand2", command=self._registrar_levante).pack(side="left", padx=8, pady=6)
+        tk.Button(tb, text="🔄 Actualizar", font=("Arial",10,"bold"),
+                  bg="#1e3a5f", fg="white", relief="flat", padx=12, pady=6,
+                  cursor="hand2", command=self._cargar).pack(side="left", padx=2, pady=6)
+
+        cols = ("ID","Cliente","Doc. Transporte","Fecha Levante","Vencimiento","Días restantes","Estado")
+        self.tree = ttk.Treeview(self, columns=cols, show="headings", height=16)
+        widths = {"ID":40,"Cliente":220,"Doc. Transporte":140,"Fecha Levante":110,
+                  "Vencimiento":110,"Días restantes":100,"Estado":90}
+        for c in cols:
+            self.tree.heading(c, text=c)
+            self.tree.column(c, width=widths[c], anchor="w")
+
+        # Color tags
+        self.tree.tag_configure("vencido",   background="#fee2e2", foreground="#dc2626")
+        self.tree.tag_configure("urgente",   background="#fef9c3", foreground="#92400e")
+        self.tree.tag_configure("ok",        background="#f0fdf4", foreground="#15803d")
+        self.tree.tag_configure("sin_fecha", background="#f8fafc", foreground="#94a3b8")
+
+        sb = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self.tree.pack(fill="both", expand=True, padx=8, pady=8)
+
+    def _cargar(self):
+        rows = db_fetch("""SELECT d.id, c.razon_social, d.numero, d.fecha_levante, d.fecha_vencimiento
+                           FROM declaraciones d
+                           LEFT JOIN clientes c ON d.cliente_id=c.id
+                           ORDER BY d.fecha_vencimiento ASC""")
+        self.tree.delete(*self.tree.get_children())
+        today = date.today()
+        alertas = []
+        for r in rows:
+            did, cliente, doc, f_lev, f_venc = r
+            if not f_lev:
+                self.tree.insert("","end",values=(did,cliente or "—",doc or "—","Sin registrar","—","—","Pendiente"),tags=("sin_fecha",))
+                continue
+            try:
+                lev_date  = datetime.strptime(f_lev, "%Y-%m-%d").date()
+                venc_date = lev_date + timedelta(days=60)
+                dias = (venc_date - today).days
+                if dias < 0:
+                    tag="vencido"; estado="VENCIDO"
+                elif dias <= 10:
+                    tag="urgente"; estado=f"URGENTE"
+                    alertas.append((cliente, doc, dias))
+                else:
+                    tag="ok"; estado="Al día"
+                self.tree.insert("","end",values=(did,cliente or "—",doc or "—",
+                    f_lev, venc_date.strftime("%Y-%m-%d"), f"{dias} días", estado),tags=(tag,))
+            except:
+                self.tree.insert("","end",values=(did,cliente or "—",doc or "—",f_lev,"Error","—","Error"),tags=("sin_fecha",))
+        if alertas:
+            msg = "⚠️ DECLARACIONES PRÓXIMAS A VENCER:\n\n"
+            for c,d,dias in alertas:
+                msg += f"• {c} — Guía {d}: {dias} días restantes\n"
+            messagebox.showwarning("Alertas de vencimiento", msg)
+
+    def _registrar_levante(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("Aviso","Seleccione una declaración."); return
+        did = self.tree.item(sel[0])["values"][0]
+        win = tk.Toplevel(self); win.title("Registrar Levante"); win.geometry("320x180")
+        win.configure(bg="white"); win.resizable(False,False)
+        tk.Label(win, text="Fecha de levante (AAAA-MM-DD):", font=("Arial",10),
+                 bg="white").pack(pady=(20,4), padx=20, anchor="w")
+        entry = tk.Entry(win, font=("Arial",12), relief="flat",
+                         highlightbackground="#cbd5e1", highlightthickness=1)
+        entry.insert(0, date.today().isoformat())
+        entry.pack(fill="x", padx=20, ipady=5)
+        def guardar():
+            fecha = entry.get().strip()
+            try:
+                datetime.strptime(fecha, "%Y-%m-%d")
+                venc = (datetime.strptime(fecha,"%Y-%m-%d") + timedelta(days=60)).strftime("%Y-%m-%d")
+                db_exec("UPDATE declaraciones SET fecha_levante=?,fecha_vencimiento=?,estado='Con levante' WHERE id=?",
+                        (fecha, venc, did))
+                win.destroy(); self._cargar()
+            except:
+                messagebox.showerror("Error","Fecha inválida. Use formato AAAA-MM-DD.")
+        tk.Button(win, text="Guardar", font=("Arial",11,"bold"), bg="#1d4ed8", fg="white",
+                  relief="flat", pady=8, cursor="hand2", command=guardar).pack(fill="x", padx=20, pady=12)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VENTANA: Recibo Oficial de Pago (ROP)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class VentanaROP(tk.Toplevel):
+    def __init__(self, parent, data, total_cop, trm):
+        super().__init__(parent)
+        self.title("Recibo Oficial de Pago — ROP")
+        self.geometry("540x620")
+        self.configure(bg="white")
+        self.data = data; self.total_cop = total_cop; self.trm = trm
+        self._build()
+
+    def _build(self):
+        # Header
+        hdr = tk.Frame(self, bg="#1d4ed8", height=54); hdr.pack(fill="x"); hdr.pack_propagate(False)
+        tk.Label(hdr, text="Recibo Oficial de Pago", font=("Arial",14,"bold"),
+                 bg="#1d4ed8", fg="white").pack(side="left", padx=16, pady=8)
+        tk.Label(hdr, text="Formulario 510 — DIAN Colombia",
+                 font=("Arial",9), bg="#1d4ed8", fg="#bfdbfe").pack(side="left")
+
+        frame = tk.Frame(self, bg="white"); frame.pack(fill="both", expand=True, padx=24, pady=16)
+
+        def row(label, value, bold=False, big=False):
+            r = tk.Frame(frame, bg="white"); r.pack(fill="x", pady=3)
+            tk.Label(r, text=label, font=("Arial",9), bg="white",
+                     fg="#64748b", width=28, anchor="w").pack(side="left")
+            tk.Label(r, text=value, font=("Arial",12 if big else 10, "bold" if bold else "normal"),
+                     bg="white", fg="#1d4ed8" if big else "#0f172a", anchor="w").pack(side="left")
+
+        # Cálculos
+        fob  = float(self.data.get("fob","0") or 0)
+        flt  = float(self.data.get("fletes","0") or 0)
+        seg  = float(self.data.get("seguros","0") or 0)
+        otr  = float(self.data.get("otrosGastos","0") or 0)
+        adj  = float(self.data.get("ajuste","0") or 0)
+        ap   = float(self.data.get("arancelPct","0") or 0)
+        ip   = float(self.data.get("ivaPct","19") or 19)
+        icp  = float(self.data.get("icPct","0") or 0)
+        cif  = fob+flt+seg+otr+adj
+        cifC = cif*self.trm
+        araC = cifC*(ap/100)
+        ivaC = (cifC+araC)*(ip/100)
+        icC  = cifC*(icp/100)
+        total= araC+ivaC+icC
+
+        def fc(n): return f"${int(round(n)):,} COP".replace(",",".")
+        def fu(n): return f"${n:,.2f} USD"
+
+        tk.Frame(frame, bg="#e2e8f0", height=1).pack(fill="x", pady=6)
+        tk.Label(frame, text="DATOS DEL IMPORTADOR", font=("Arial",9,"bold"),
+                 bg="white", fg="#1d4ed8").pack(anchor="w", pady=(0,4))
+        row("NIT / Razón social:", f"{self.data.get('nit','')} - {self.data.get('razonSocial','')}")
+        row("Doc. transporte:", self.data.get("docTransporte",""))
+        row("Fecha declaración:", date.today().strftime("%d/%m/%Y"))
+        row("Seccional DIAN:", self.data.get("codSeccional",""))
+
+        tk.Frame(frame, bg="#e2e8f0", height=1).pack(fill="x", pady=8)
+        tk.Label(frame, text="LIQUIDACIÓN", font=("Arial",9,"bold"),
+                 bg="white", fg="#1d4ed8").pack(anchor="w", pady=(0,4))
+        row("Valor CIF:", f"{fu(cif)} = {fc(cifC)}")
+        row("Tasa de cambio:", f"${self.trm:,.2f} COP/USD")
+        row(f"Casilla 72 — Arancel ({ap}%):", fc(araC))
+        row(f"Casilla 76 — IVA ({ip}%):", fc(ivaC))
+        if icp > 0: row(f"Imp. al consumo ({icp}%):", fc(icC))
+
+        tk.Frame(frame, bg="#1d4ed8", height=2).pack(fill="x", pady=8)
+        row("CASILLA 980 — TOTAL A PAGAR:", fc(total), bold=True, big=True)
+        tk.Frame(frame, bg="#1d4ed8", height=2).pack(fill="x", pady=(0,8))
+
+        # Código de referencia
+        import hashlib
+        ref = hashlib.md5(f"{self.data.get('nit','')}{self.data.get('docTransporte','')}{date.today()}".encode()).hexdigest()[:12].upper()
+        row("Referencia de pago:", ref)
+        row("Banco autorizado:", "Cualquier banco habilitado DIAN")
+        row("Vigencia:", date.today().strftime("%d/%m/%Y")+" (mismo día hábil)")
+
+        tk.Label(frame, text="⚠️  Este ROP es de referencia. El oficial se genera en el SYGA.",
+                 font=("Arial",8), bg="white", fg="#94a3b8", wraplength=460).pack(pady=(8,0))
+
+        btns = tk.Frame(self, bg="white"); btns.pack(fill="x", padx=24, pady=(0,16))
+        tk.Button(btns, text="🖨️  Imprimir ROP", font=("Arial",11,"bold"),
+                  bg="#1d4ed8", fg="white", relief="flat", pady=10, cursor="hand2",
+                  command=self._imprimir).pack(side="left", fill="x", expand=True, padx=(0,4))
+        tk.Button(btns, text="🌐  Ir al SYGA", font=("Arial",11,"bold"),
+                  bg="#0f766e", fg="white", relief="flat", pady=10, cursor="hand2",
+                  command=lambda: webbrowser.open("https://importaciones.dian.gov.co")
+                  ).pack(side="left", fill="x", expand=True)
+
+    def _imprimir(self):
+        fob=float(self.data.get("fob","0") or 0); flt=float(self.data.get("fletes","0") or 0)
+        seg=float(self.data.get("seguros","0") or 0); otr=float(self.data.get("otrosGastos","0") or 0)
+        adj=float(self.data.get("ajuste","0") or 0); ap=float(self.data.get("arancelPct","0") or 0)
+        ip=float(self.data.get("ivaPct","19") or 19); icp=float(self.data.get("icPct","0") or 0)
+        cif=fob+flt+seg+otr+adj; cifC=cif*self.trm
+        araC=cifC*(ap/100); ivaC=(cifC+araC)*(ip/100); icC=cifC*(icp/100); total=araC+ivaC+icC
+        def fc(n): return f"${int(round(n)):,} COP".replace(",",".")
+        import hashlib, tempfile, os
+        ref = hashlib.md5(f"{self.data.get('nit','')}{self.data.get('docTransporte','')}{date.today()}".encode()).hexdigest()[:12].upper()
+        txt = f"""
+RECIBO OFICIAL DE PAGO — REFERENCIA
+DIAN Colombia — Formulario 510
+{'='*50}
+NIT:             {self.data.get('nit','')}
+Importador:      {self.data.get('razonSocial','')}
+Doc. Transporte: {self.data.get('docTransporte','')}
+Fecha:           {date.today().strftime('%d/%m/%Y')}
+Seccional:       {self.data.get('codSeccional','')}
+{'='*50}
+Valor CIF:       ${cif:.2f} USD = {fc(cifC)}
+TRM:             ${self.trm:,.2f} COP/USD
+Arancel ({ap}%): {fc(araC)}
+IVA ({ip}%):     {fc(ivaC)}
+Imp. Consumo:    {fc(icC)}
+{'='*50}
+TOTAL A PAGAR:   {fc(total)}
+Referencia:      {ref}
+{'='*50}
+Pague en cualquier banco habilitado DIAN
+Vigencia: {date.today().strftime('%d/%m/%Y')}
+
+NOTA: Recibo de referencia. El oficial se genera en el SYGA DIAN.
+"""
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8")
+        tmp.write(txt); tmp.close()
+        os.startfile(tmp.name)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FASE 3 — EDI / XML, Consulta Levante, Entrega Urgente
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Generador de archivo EDI (XML SYGA) ──────────────────────────────────────
+
+class VentanaEDI(tk.Toplevel):
+    def __init__(self, parent, data):
+        super().__init__(parent)
+        self.title("Generar Archivo EDI — SYGA")
+        self.geometry("700x600")
+        self.configure(bg="white")
+        self.data = data
+        self._build()
+
+    def _build(self):
+        tk.Frame(self, bg="#1d4ed8", height=4).pack(fill="x")
+        tk.Label(self, text="📤  Archivo EDI — Transmisión SYGA",
+                 font=("Arial",13,"bold"), bg="white", fg="#1d4ed8").pack(pady=(14,2))
+        tk.Label(self, text="Genera el archivo XML/EDI para subir directamente al SYGA DIAN",
+                 font=("Arial",9), bg="white", fg="#64748b").pack(pady=(0,10))
+
+        # Preview area
+        frame = tk.Frame(self, bg="white"); frame.pack(fill="both", expand=True, padx=16)
+        self.txt = tk.Text(frame, font=("Courier New",9), bg="#0f172a", fg="#22d3ee",
+                           relief="flat", wrap="none",
+                           highlightbackground="#1e3a5f", highlightthickness=1)
+        sbx = ttk.Scrollbar(frame, orient="horizontal", command=self.txt.xview)
+        sby = ttk.Scrollbar(frame, orient="vertical",   command=self.txt.yview)
+        self.txt.configure(xscrollcommand=sbx.set, yscrollcommand=sby.set)
+        sby.pack(side="right", fill="y"); sbx.pack(side="bottom", fill="x")
+        self.txt.pack(fill="both", expand=True)
+        self._generar_xml()
+
+        btns = tk.Frame(self, bg="white"); btns.pack(fill="x", padx=16, pady=12)
+        tk.Button(btns, text="💾  Guardar .xml", font=("Arial",11,"bold"),
+                  bg="#1d4ed8", fg="white", relief="flat", pady=10, cursor="hand2",
+                  command=self._guardar).pack(side="left", fill="x", expand=True, padx=(0,4))
+        tk.Button(btns, text="🌐  Ir al SYGA", font=("Arial",11,"bold"),
+                  bg="#0f766e", fg="white", relief="flat", pady=10, cursor="hand2",
+                  command=lambda: webbrowser.open("https://importaciones.dian.gov.co")
+                  ).pack(side="left", fill="x", expand=True, padx=(0,4))
+        tk.Button(btns, text="Cerrar", font=("Arial",11),
+                  bg="#f1f5f9", fg="#64748b", relief="flat", pady=10,
+                  cursor="hand2", command=self.destroy).pack(side="left", fill="x", expand=True)
+
+    def _generar_xml(self):
+        d = self.data
+        import xml.sax.saxutils as saxutils
+        def g(k): return saxutils.escape(str(d.get(k,"") or "").strip())
+        fob=float(d.get("fob","0") or 0); flt=float(d.get("fletes","0") or 0)
+        seg=float(d.get("seguros","0") or 0); otr=float(d.get("otrosGastos","0") or 0)
+        adj=float(d.get("ajuste","0") or 0); trm=float(d.get("tasaCambio","4150") or 4150)
+        ap=float(d.get("arancelPct","0") or 0); ip=float(d.get("ivaPct","19") or 19); icp=float(d.get("icPct","0") or 0)
+        cif=fob+flt+seg+otr+adj; cifC=cif*trm
+        araC=cifC*(ap/100); ivaC=(cifC+araC)*(ip/100); icC=cifC*(icp/100); total=araC+ivaC+icC
+
+        xml = f'''<?xml version="1.0" encoding="UTF-8"?>
+<!-- Archivo EDI generado por DeclaraFácil 510 — {date.today().isoformat()} -->
+<!-- Para uso con SYGA DIAN — Declaración de Importación Simplificada -->
+<DeclaracionImportacion xmlns="urn:dian:gov:co:syga:1.0"
+    tipo="510" version="1.0" fecha="{date.today().isoformat()}">
+
+  <!-- SECCIÓN 01: IMPORTADOR -->
+  <Importador>
+    <NIT>{g("nit")}</NIT>
+    <DigitoVerificacion>{g("dv")}</DigitoVerificacion>
+    <RazonSocial>{g("razonSocial")}</RazonSocial>
+    <Direccion>{g("direccion")}</Direccion>
+    <Telefono>{g("telefono")}</Telefono>
+    <CodigoSeccional>{g("codSeccional")}</CodigoSeccional>
+    <CodigoDepartamento>{g("codDpto")}</CodigoDepartamento>
+    <CodigoMunicipio>{g("codMunicipio")}</CodigoMunicipio>
+  </Importador>
+
+  <!-- SECCIÓN 02: DECLARANTE -->
+  <Declarante>
+    <NIT>{g("nitDecl")}</NIT>
+    <DigitoVerificacion>{g("dvDecl")}</DigitoVerificacion>
+    <RazonSocial>{g("razonDecl")}</RazonSocial>
+    <TipoUsuario>{g("tipoUsuario")}</TipoUsuario>
+    <CodigoUsuario>{g("codUsuario")}</CodigoUsuario>
+    <NumeroDocumento>{g("numDocDecl")}</NumeroDocumento>
+    <NombresApellidos>{g("nombresDecl")}</NombresApellidos>
+  </Declarante>
+
+  <!-- SECCIÓN 03: MANIFIESTO Y TRANSPORTE -->
+  <Transporte>
+    <TipoDeclaracion>{g("tipoDecl")}</TipoDeclaracion>
+    <ManifiestoCarga>{g("manifestoCarga")}</ManifiestoCarga>
+    <FechaLlegada>{g("fechaLlegada")}</FechaLlegada>
+    <LugarIngreso>{g("codLugarIngreso")}</LugarIngreso>
+    <ModoTransporte>{g("codModo")}</ModoTransporte>
+    <DocumentoTransporte>{g("docTransporte")}</DocumentoTransporte>
+    <FechaDocTransporte>{g("fechaDocTransporte")}</FechaDocTransporte>
+    <PaisProcedencia>{g("codProcedencia")}</PaisProcedencia>
+    <TasaCambio>{g("tasaCambio")}</TasaCambio>
+  </Transporte>
+
+  <!-- SECCIÓN 04: MERCANCÍA -->
+  <Mercancia>
+    <Exportador>{g("nombreExportador")}</Exportador>
+    <PaisCompra>{g("codPaisCompra")}</PaisCompra>
+    <PaisOrigen>{g("codPaisOrigen")}</PaisOrigen>
+    <FormaPago>{g("formaPago")}</FormaPago>
+    <SubpartidaArancelaria>{g("subpartida")}</SubpartidaArancelaria>
+    <NumeroBultos>{g("numBultos")}</NumeroBultos>
+    <Cantidad>{g("cantidad")}</Cantidad>
+    <PesoBrutoKg>{g("pesoBruto")}</PesoBrutoKg>
+    <PesoNetoKg>{g("pesoNeto")}</PesoNetoKg>
+    <ValorFOB moneda="USD">{fob:.2f}</ValorFOB>
+    <ValorFletes moneda="USD">{flt:.2f}</ValorFletes>
+    <ValorSeguros moneda="USD">{seg:.2f}</ValorSeguros>
+    <OtrosGastos moneda="USD">{otr:.2f}</OtrosGastos>
+    <AjusteValor moneda="USD">{adj:.2f}</AjusteValor>
+    <ValorAduanaCIF moneda="USD">{cif:.2f}</ValorAduanaCIF>
+    <Descripcion>{g("descripcion")}</Descripcion>
+  </Mercancia>
+
+  <!-- SECCIÓN 05: LIQUIDACIÓN TRIBUTARIA -->
+  <Liquidacion>
+    <TasaCambioCOPUSD>{trm:.2f}</TasaCambioCOPUSD>
+    <ValorAduanaCOP>{cifC:.2f}</ValorAduanaCOP>
+    <PorcentajeArancel>{ap}</PorcentajeArancel>
+    <Casilla72ArancelCOP>{araC:.2f}</Casilla72ArancelCOP>
+    <PorcentajeIVA>{ip}</PorcentajeIVA>
+    <Casilla76IVACOP>{ivaC:.2f}</Casilla76IVACOP>
+    <PorcentajeImpConsumo>{icp}</PorcentajeImpConsumo>
+    <ImpuestoConsumoCOP>{icC:.2f}</ImpuestoConsumoCOP>
+    <Casilla980TotalPagarCOP>{total:.2f}</Casilla980TotalPagarCOP>
+  </Liquidacion>
+
+</DeclaracionImportacion>'''
+        self.xml_content = xml
+        self.txt.delete("1.0","end")
+        self.txt.insert("1.0", xml)
+
+    def _guardar(self):
+        path = filedialog.asksaveasfilename(
+            defaultextension=".xml", filetypes=[("XML EDI","*.xml")],
+            initialfile=f"EDI_510_{date.today().isoformat()}.xml",
+            title="Guardar archivo EDI")
+        if not path: return
+        with open(path,"w",encoding="utf-8") as f:
+            f.write(self.xml_content)
+        messagebox.showinfo("Guardado",
+            f"✅ Archivo EDI guardado:\n{path}\n\n"
+            f"Súbalo al SYGA DIAN en:\nhttps://importaciones.dian.gov.co")
+
+
+# ── Consulta Estado de Levante ────────────────────────────────────────────────
+
+class VentanaConsultaLevante(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Consulta Estado de Levante — SYGA")
+        self.geometry("540x420")
+        self.configure(bg="white")
+        self._build()
+
+    def _build(self):
+        tk.Frame(self, bg="#1d4ed8", height=4).pack(fill="x")
+        tk.Label(self, text="🔍  Consulta Estado de Levante",
+                 font=("Arial",13,"bold"), bg="white", fg="#1d4ed8").pack(pady=(16,4))
+        tk.Label(self, text="Consulte el estado de su declaración en el SYGA DIAN",
+                 font=("Arial",9), bg="white", fg="#64748b").pack(pady=(0,16))
+
+        frame = tk.Frame(self, bg="white"); frame.pack(fill="x", padx=24)
+
+        # Campos de búsqueda
+        for label, attr in [
+            ("NIT del importador:", "ent_nit"),
+            ("No. doc. transporte (Guía/AWB/BL):", "ent_doc"),
+            ("No. declaración (si tiene):", "ent_decl"),
+        ]:
+            tk.Label(frame, text=label, font=("Arial",10), bg="white",
+                     fg="#475569").pack(anchor="w", pady=(8,2))
+            ent = tk.Entry(frame, font=("Arial",12), relief="flat", bg="#f8fafc",
+                           highlightbackground="#cbd5e1", highlightthickness=1)
+            ent.pack(fill="x", ipady=5)
+            setattr(self, attr, ent)
+
+        tk.Button(frame, text="🔍  Consultar en SYGA DIAN",
+                  font=("Arial",11,"bold"), bg="#1d4ed8", fg="white",
+                  relief="flat", pady=10, cursor="hand2",
+                  command=self._consultar).pack(fill="x", pady=16)
+
+        # Resultado
+        self.resultado = tk.Frame(self, bg="#f8fafc",
+                                   highlightbackground="#e2e8f0", highlightthickness=1)
+        self.resultado.pack(fill="x", padx=24, pady=(0,8))
+        self.lbl_resultado = tk.Label(self.resultado,
+            text="Ingrese los datos y presione Consultar",
+            font=("Arial",10), bg="#f8fafc", fg="#94a3b8",
+            wraplength=440, justify="left", pady=12, padx=12)
+        self.lbl_resultado.pack(fill="x")
+
+        tk.Label(self, text="⚠️  La consulta abre el portal oficial del SYGA. La información exacta solo está disponible con credenciales DIAN.",
+                 font=("Arial",8), bg="white", fg="#94a3b8",
+                 justify="center").pack(pady=8)
+
+    def _consultar(self):
+        nit  = self.ent_nit.get().strip()
+        doc  = self.ent_doc.get().strip()
+        decl = self.ent_decl.get().strip()
+        if not nit and not doc:
+            messagebox.showwarning("Aviso","Ingrese al menos el NIT o el doc. de transporte.")
+            return
+        # Build SYGA URL with params
+        params = []
+        if nit:  params.append(f"nit={nit}")
+        if doc:  params.append(f"docTransporte={doc}")
+        if decl: params.append(f"numDecl={decl}")
+        url = "https://importaciones.dian.gov.co/Formulario510/ConsultaEstado?" + "&".join(params)
+        self.lbl_resultado.config(
+            text=f"✅ Abriendo SYGA DIAN con los datos ingresados...\n\nNIT: {nit}\nDoc. Transporte: {doc}\n\nSi la página no carga automáticamente, ingrese manualmente al portal.",
+            fg="#0f172a")
+        webbrowser.open("https://importaciones.dian.gov.co")
+
+
+# ── Solicitud Entrega Urgente ─────────────────────────────────────────────────
+
+class VentanaEntregaUrgente(tk.Toplevel):
+    def __init__(self, parent, data):
+        super().__init__(parent)
+        self.title("Solicitud de Entrega Urgente")
+        self.geometry("580x620")
+        self.configure(bg="white")
+        self.data = data
+        self._build()
+
+    def _build(self):
+        tk.Frame(self, bg="#dc2626", height=4).pack(fill="x")
+        tk.Label(self, text="🚨  Solicitud de Entrega Urgente / Levante Especial",
+                 font=("Arial",12,"bold"), bg="white", fg="#dc2626").pack(pady=(14,2))
+        tk.Label(self, text="Para mercancía perecedera, medicamentos urgentes o casos especiales",
+                 font=("Arial",9), bg="white", fg="#64748b").pack(pady=(0,12))
+
+        frame = tk.Frame(self, bg="white"); frame.pack(fill="both", expand=True, padx=20)
+
+        def field(label, attr, default="", height=1):
+            tk.Label(frame, text=label, font=("Arial",10), bg="white",
+                     fg="#475569").pack(anchor="w", pady=(8,2))
+            if height == 1:
+                w = tk.Entry(frame, font=("Arial",11), relief="flat", bg="#f8fafc",
+                             highlightbackground="#cbd5e1", highlightthickness=1)
+                w.insert(0, default); w.pack(fill="x", ipady=5)
+            else:
+                w = tk.Text(frame, font=("Arial",11), relief="flat", bg="#f8fafc",
+                            height=height, highlightbackground="#cbd5e1", highlightthickness=1)
+                w.insert("1.0", default); w.pack(fill="x")
+            setattr(self, attr, w)
+
+        d = self.data
+        field("Importador (Razón social):", "ent_importador",
+              d.get("razonSocial",""))
+        field("NIT:", "ent_nit", d.get("nit",""))
+        field("No. doc. transporte (Guía/AWB):", "ent_doc",
+              d.get("docTransporte",""))
+        field("Descripción de la mercancía:", "ent_desc",
+              d.get("descripcion",""))
+
+        tk.Label(frame, text="Tipo de urgencia:", font=("Arial",10),
+                 bg="white", fg="#475569").pack(anchor="w", pady=(8,2))
+        self.tipo_var = tk.StringVar(value="Mercancía perecedera")
+        tipos = ["Mercancía perecedera","Medicamentos / insumos médicos urgentes",
+                 "Materia prima para producción urgente","Animales vivos",
+                 "Órganos / tejidos para trasplante","Otro"]
+        ttk.Combobox(frame, values=tipos, textvariable=self.tipo_var,
+                     font=("Arial",11), state="readonly").pack(fill="x")
+
+        field("Justificación detallada de la urgencia:", "ent_justif",
+              "Indique el motivo por el cual se requiere levante urgente...", height=4)
+
+        field("Nombre del solicitante:", "ent_solicitante", d.get("nombresDecl",""))
+        field("Teléfono de contacto:", "ent_telefono", d.get("telefono",""))
+
+        btns = tk.Frame(self, bg="white"); btns.pack(fill="x", padx=20, pady=12)
+        tk.Button(btns, text="🖨️  Generar solicitud",
+                  font=("Arial",11,"bold"), bg="#dc2626", fg="white",
+                  relief="flat", pady=10, cursor="hand2",
+                  command=self._generar).pack(side="left", fill="x", expand=True, padx=(0,4))
+        tk.Button(btns, text="🌐  Ir al SYGA",
+                  font=("Arial",11,"bold"), bg="#0369a1", fg="white",
+                  relief="flat", pady=10, cursor="hand2",
+                  command=lambda: webbrowser.open("https://importaciones.dian.gov.co")
+                  ).pack(side="left", fill="x", expand=True)
+
+    def _get(self, attr):
+        w = getattr(self, attr, None)
+        if w is None: return ""
+        if isinstance(w, tk.Text): return w.get("1.0","end-1c").strip()
+        return w.get().strip()
+
+    def _generar(self):
+        txt = f"""
+SOLICITUD DE ENTREGA URGENTE / LEVANTE ESPECIAL
+DIAN Colombia — Seccional {self.data.get("codSeccional","")}
+{"="*56}
+Fecha de solicitud: {date.today().strftime("%d/%m/%Y")}
+Hora: {datetime.now().strftime("%H:%M")}
+
+DATOS DEL IMPORTADOR
+{"─"*40}
+Importador:       {self._get("ent_importador")}
+NIT:              {self._get("ent_nit")}
+Doc. transporte:  {self._get("ent_doc")}
+Descripción:      {self._get("ent_desc")}
+
+TIPO DE URGENCIA
+{"─"*40}
+{self.tipo_var.get()}
+
+JUSTIFICACIÓN
+{"─"*40}
+{self._get("ent_justif")}
+
+DATOS DEL SOLICITANTE
+{"─"*40}
+Nombre:    {self._get("ent_solicitante")}
+Teléfono:  {self._get("ent_telefono")}
+
+{"="*56}
+Presente este documento en la Seccional DIAN correspondiente
+junto con los documentos soporte de la declaración.
+Teléfono DIAN: 57 (1) 307 1111
+Portal SYGA: https://importaciones.dian.gov.co
+"""
+        path = filedialog.asksaveasfilename(
+            defaultextension=".txt",
+            filetypes=[("Texto","*.txt")],
+            initialfile=f"EntregaUrgente_{date.today().isoformat()}.txt",
+            title="Guardar solicitud")
+        if not path: return
+        with open(path,"w",encoding="utf-8") as f:
+            f.write(txt)
+        import os; os.startfile(path)
+        messagebox.showinfo("Generado",
+            f"✅ Solicitud generada:\n{path}\n\n"
+            "Preséntela en la seccional DIAN junto con los documentos soporte.")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# APP PRINCIPAL
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class VentanaConfigAgencia(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Configuración de la Agencia")
+        self.geometry("520x580")
+        self.configure(bg="white")
+        self.resizable(False, False)
+        self.fields = {}
+        self._build()
+        self._cargar()
+
+    def _build(self):
+        tk.Frame(self, bg="#1d4ed8", height=4).pack(fill="x")
+        tk.Label(self, text="⚙️  Configuración de la Agencia",
+                 font=("Arial",13,"bold"), bg="white", fg="#1d4ed8").pack(pady=(16,4))
+
+        nb = ttk.Notebook(self); nb.pack(fill="both", expand=True, padx=16, pady=8)
+
+        # Tab 1: Datos agencia
+        t1 = tk.Frame(nb, bg="white"); nb.add(t1, text="  Agencia  ")
+        for label, key in [
+            ("Nombre de la agencia:", "agencia_nombre"),
+            ("NIT de la agencia:", "agencia_nit"),
+            ("Teléfono:", "agencia_tel"),
+            ("Dirección:", "agencia_dir"),
+        ]:
+            tk.Label(t1, text=label, font=("Arial",10), bg="white",
+                     fg="#475569").pack(anchor="w", padx=20, pady=(12,2))
+            w = tk.Entry(t1, font=("Arial",11), relief="flat",
+                         highlightbackground="#cbd5e1", highlightthickness=1)
+            w.pack(fill="x", padx=20, ipady=6)
+            self.fields[key] = w
+
+        # Tab 2: Usuarios
+        t2 = tk.Frame(nb, bg="white"); nb.add(t2, text="  Usuarios  ")
+        tk.Label(t2, text="Usuarios del sistema:", font=("Arial",10,"bold"),
+                 bg="white", fg="#1d4ed8").pack(anchor="w", padx=20, pady=(16,8))
+        cols = ("Usuario","Rol","Estado")
+        self.tree_users = ttk.Treeview(t2, columns=cols, show="headings", height=6)
+        for c in cols:
+            self.tree_users.heading(c, text=c)
+            self.tree_users.column(c, width={"Usuario":160,"Rol":100,"Estado":80}[c])
+        self.tree_users.pack(fill="x", padx=20)
+        self._cargar_usuarios()
+
+        btns_u = tk.Frame(t2, bg="white"); btns_u.pack(fill="x", padx=20, pady=8)
+        tk.Button(btns_u, text="➕ Nuevo usuario", font=("Arial",9,"bold"),
+                  bg="#1d4ed8", fg="white", relief="flat", padx=10, pady=6,
+                  cursor="hand2", command=self._nuevo_usuario).pack(side="left", padx=(0,4))
+        tk.Button(btns_u, text="🔑 Cambiar contraseña", font=("Arial",9,"bold"),
+                  bg="#0f766e", fg="white", relief="flat", padx=10, pady=6,
+                  cursor="hand2", command=self._cambiar_pwd).pack(side="left")
+
+        # Tab 3: Licencia
+        t3 = tk.Frame(nb, bg="white"); nb.add(t3, text="  Licencia  ")
+        self._build_licencia(t3)
+
+        # Tab 4: Respaldo
+        t4 = tk.Frame(nb, bg="white"); nb.add(t4, text="  Respaldo  ")
+        self._build_respaldo(t4)
+
+        # Save button
+        tk.Button(self, text="💾  Guardar configuración", font=("Arial",11,"bold"),
+                  bg="#1d4ed8", fg="white", relief="flat", pady=10,
+                  cursor="hand2", command=self._guardar).pack(fill="x", padx=16, pady=(0,16))
+
+    def _build_licencia(self, parent):
+        lic = db_fetch("SELECT valor FROM config WHERE clave='licencia_activa'")
+        activa = lic[0][0] == "1" if lic else False
+        cnt = obtener_contador_uso()
+        max_t = db_fetch("SELECT valor FROM config WHERE clave='max_decl_trial'")
+        max_trial = int(max_t[0][0]) if max_t else 5
+
+        estado_color = "#22c55e" if activa else "#f59e0b"
+        estado_text  = "✅ LICENCIA ACTIVA" if activa else f"⚠️ MODO PRUEBA ({cnt}/{max_trial} declaraciones)"
+
+        tk.Label(parent, text=estado_text, font=("Arial",12,"bold"),
+                 bg="white", fg=estado_color).pack(pady=(20,8))
+
+        if not activa:
+            tk.Label(parent, text=f"En modo prueba puede crear hasta {max_trial} declaraciones.\nEnvíe el código de equipo de abajo para obtener su clave.",
+                     font=("Arial",9), bg="white", fg="#64748b",
+                     justify="center").pack(pady=(0,12))
+
+        # ID de máquina — esto es lo que el cliente debe enviar al vendedor
+        mid = get_machine_id()
+        idf = tk.Frame(parent, bg="#f8fafc", highlightbackground="#e2e8f0", highlightthickness=1)
+        idf.pack(fill="x", padx=20, pady=(0,16))
+        tk.Label(idf, text="CÓDIGO DE ESTE EQUIPO (envíelo al proveedor)",
+                 font=("Arial",8,"bold"), bg="#f8fafc", fg="#94a3b8").pack(anchor="w", padx=10, pady=(8,2))
+        idrow = tk.Frame(idf, bg="#f8fafc"); idrow.pack(fill="x", padx=10, pady=(0,8))
+        tk.Label(idrow, text=mid, font=("Courier New",13,"bold"),
+                 bg="#f8fafc", fg="#1d4ed8").pack(side="left")
+        tk.Button(idrow, text="📋 Copiar", font=("Arial",8,"bold"), bg="#1d4ed8", fg="white",
+                  relief="flat", padx=8, pady=3, cursor="hand2",
+                  command=lambda: (self.clipboard_clear(), self.clipboard_append(mid))
+                  ).pack(side="right")
+
+        tk.Label(parent, text="Clave de activación:", font=("Arial",10),
+                 bg="white", fg="#475569").pack(padx=20, anchor="w")
+        self.ent_lic = tk.Entry(parent, font=("Arial",12), relief="flat",
+                                 highlightbackground="#cbd5e1", highlightthickness=1)
+        lic_key = db_fetch("SELECT valor FROM config WHERE clave='licencia_key'")
+        if lic_key and lic_key[0][0]:
+            self.ent_lic.insert(0, lic_key[0][0])
+        self.ent_lic.pack(fill="x", padx=20, ipady=6, pady=(2,12))
+        tk.Button(parent, text="🔑  Activar licencia", font=("Arial",11,"bold"),
+                  bg="#1d4ed8", fg="white", relief="flat", pady=8,
+                  cursor="hand2", command=self._activar).pack(fill="x", padx=20)
+
+        tk.Label(parent,
+                 text="Para obtener su clave de activación contáctenos:\nbentjake15@gmail.com",
+                 font=("Arial",9), bg="white", fg="#94a3b8",
+                 justify="center").pack(pady=16)
+
+    def _build_respaldo(self, parent):
+        tk.Label(parent, text="💾  Respaldo de Base de Datos",
+                 font=("Arial",11,"bold"), bg="white", fg="#1d4ed8").pack(pady=(20,8))
+        tk.Label(parent, text="Guarde una copia de seguridad de todos sus clientes,\ndeclaraciones e historial.",
+                 font=("Arial",9), bg="white", fg="#64748b", justify="center").pack(pady=(0,8))
+
+        # Mostrar ubicación de los datos
+        app_dir = get_app_data_dir()
+        tk.Label(parent, text=f"📁  Datos guardados en:\n{app_dir}",
+                 font=("Arial",8), bg="white", fg="#94a3b8",
+                 justify="center", wraplength=440).pack(pady=(0,12))
+
+        db_path = get_db_path()
+        size = os.path.getsize(db_path) if os.path.exists(db_path) else 0
+        cnt_c = db_fetch("SELECT COUNT(*) FROM clientes")[0][0]
+        cnt_d = db_fetch("SELECT COUNT(*) FROM declaraciones")[0][0]
+
+        # Contar respaldos automáticos existentes
+        try:
+            baks = [f for f in os.listdir(app_dir) if f.startswith("formulario510_bak")]
+        except Exception:
+            baks = []
+
+        info = tk.Frame(parent, bg="#f8fafc", highlightbackground="#e2e8f0", highlightthickness=1)
+        info.pack(fill="x", padx=20, pady=(0,16))
+        for label, val in [("Clientes registrados:", str(cnt_c)),
+                            ("Declaraciones:", str(cnt_d)),
+                            ("Tamaño DB:", f"{size/1024:.1f} KB"),
+                            ("Respaldos automáticos:", str(len(baks)))]:
+            r = tk.Frame(info, bg="#f8fafc"); r.pack(fill="x", padx=12, pady=3)
+            tk.Label(r, text=label, font=("Arial",9), bg="#f8fafc", fg="#64748b").pack(side="left")
+            tk.Label(r, text=val, font=("Arial",9,"bold"), bg="#f8fafc", fg="#0f172a").pack(side="right")
+
+        tk.Button(parent, text="📤  Guardar respaldo ahora", font=("Arial",11,"bold"),
+                  bg="#0f766e", fg="white", relief="flat", pady=8,
+                  cursor="hand2", command=self._respaldar).pack(fill="x", padx=20, pady=(0,8))
+        tk.Button(parent, text="📂  Abrir carpeta de datos", font=("Arial",11,"bold"),
+                  bg="#1e3a5f", fg="white", relief="flat", pady=8,
+                  cursor="hand2", command=lambda: os.startfile(app_dir)).pack(fill="x", padx=20, pady=(0,8))
+        tk.Button(parent, text="📥  Restaurar respaldo", font=("Arial",11,"bold"),
+                  bg="#7c3aed", fg="white", relief="flat", pady=8,
+                  cursor="hand2", command=self._restaurar).pack(fill="x", padx=20)
+
+    def _cargar(self):
+        for key, w in self.fields.items():
+            rows = db_fetch("SELECT valor FROM config WHERE clave=?", (key,))
+            if rows: w.delete(0,"end"); w.insert(0, rows[0][0])
+
+    def _cargar_usuarios(self):
+        self.tree_users.delete(*self.tree_users.get_children())
+        for r in db_fetch("SELECT username,rol,activo FROM usuarios"):
+            self.tree_users.insert("","end", values=(r[0],r[1],"Activo" if r[2] else "Inactivo"))
+
+    def _guardar(self):
+        for key, w in self.fields.items():
+            db_exec("UPDATE config SET valor=? WHERE clave=?", (w.get().strip(), key))
+        messagebox.showinfo("Guardado","✅ Configuración guardada.")
+
+    def _activar(self):
+        key = self.ent_lic.get().strip()
+        mid = get_machine_id()
+        if validar_clave_licencia(key, mid):
+            db_exec("UPDATE config SET valor='1' WHERE clave='licencia_activa'")
+            db_exec("UPDATE config SET valor=? WHERE clave='licencia_key'", (key,))
+            messagebox.showinfo("Activado","✅ Licencia activada correctamente para este equipo.\nReinicie la aplicación.")
+        else:
+            messagebox.showerror("Clave inválida",
+                "La clave ingresada no corresponde a este equipo.\n\n"
+                "Envíe el CÓDIGO DE ESTE EQUIPO (arriba) a bentjake15@gmail.com para recibir la clave correcta.")
+
+    def _nuevo_usuario(self):
+        win = tk.Toplevel(self); win.title("Nuevo usuario")
+        win.geometry("340x280"); win.configure(bg="white"); win.resizable(False,False)
+        tk.Frame(win, bg="#1d4ed8", height=3).pack(fill="x")
+        tk.Label(win, text="Nuevo Usuario", font=("Arial",12,"bold"),
+                 bg="white", fg="#1d4ed8").pack(pady=(14,12))
+        frame = tk.Frame(win, bg="white"); frame.pack(fill="x", padx=24)
+        entries = {}
+        for label, key, show in [("Usuario:","user",""),("Contraseña:","pwd","•"),("Repetir contraseña:","pwd2","•")]:
+            tk.Label(frame, text=label, font=("Arial",10), bg="white", fg="#475569").pack(anchor="w")
+            e = tk.Entry(frame, font=("Arial",11), show=show, relief="flat",
+                         highlightbackground="#cbd5e1", highlightthickness=1)
+            e.pack(fill="x", ipady=5, pady=(2,8)); entries[key] = e
+        tk.Label(frame, text="Rol:", font=("Arial",10), bg="white", fg="#475569").pack(anchor="w")
+        rol_var = tk.StringVar(value="operador")
+        ttk.Combobox(frame, values=["operador","admin"], textvariable=rol_var,
+                     state="readonly", font=("Arial",11)).pack(fill="x")
+        def crear():
+            u=entries["user"].get().strip(); p=entries["pwd"].get(); p2=entries["pwd2"].get()
+            if not u or not p: messagebox.showwarning("Aviso","Complete todos los campos."); return
+            if p != p2: messagebox.showwarning("Aviso","Las contraseñas no coinciden."); return
+            try:
+                db_exec("INSERT INTO usuarios(username,password_hash,rol) VALUES(?,?,?)",
+                        (u, hashlib.sha256(p.encode()).hexdigest(), rol_var.get()))
+                self._cargar_usuarios(); win.destroy()
+                messagebox.showinfo("Creado",f"✅ Usuario '{u}' creado.")
+            except: messagebox.showerror("Error","El usuario ya existe.")
+        tk.Button(win, text="Crear usuario", font=("Arial",11,"bold"),
+                  bg="#1d4ed8", fg="white", relief="flat", pady=8,
+                  cursor="hand2", command=crear).pack(fill="x", padx=24, pady=12)
+
+    def _cambiar_pwd(self):
+        sel = self.tree_users.selection()
+        if not sel: messagebox.showwarning("Aviso","Seleccione un usuario."); return
+        user = self.tree_users.item(sel[0])["values"][0]
+        win = tk.Toplevel(self); win.title("Cambiar contraseña")
+        win.geometry("320x220"); win.configure(bg="white"); win.resizable(False,False)
+        tk.Label(win, text=f"Cambiar contraseña: {user}", font=("Arial",11,"bold"),
+                 bg="white", fg="#1d4ed8").pack(pady=(16,12))
+        frame = tk.Frame(win, bg="white"); frame.pack(fill="x", padx=24)
+        entries = {}
+        for label, key in [("Nueva contraseña:","pwd"),("Repetir:","pwd2")]:
+            tk.Label(frame, text=label, font=("Arial",10), bg="white", fg="#475569").pack(anchor="w")
+            e = tk.Entry(frame, font=("Arial",11), show="•", relief="flat",
+                         highlightbackground="#cbd5e1", highlightthickness=1)
+            e.pack(fill="x", ipady=5, pady=(2,8)); entries[key] = e
+        def cambiar():
+            p=entries["pwd"].get(); p2=entries["pwd2"].get()
+            if not p: return
+            if p != p2: messagebox.showwarning("Aviso","Las contraseñas no coinciden."); return
+            db_exec("UPDATE usuarios SET password_hash=? WHERE username=?",
+                    (hashlib.sha256(p.encode()).hexdigest(), user))
+            win.destroy(); messagebox.showinfo("Cambiado","✅ Contraseña actualizada.")
+        tk.Button(win, text="Cambiar", font=("Arial",11,"bold"),
+                  bg="#1d4ed8", fg="white", relief="flat", pady=8,
+                  cursor="hand2", command=cambiar).pack(fill="x", padx=24)
+
+    def _respaldar(self):
+        path = filedialog.asksaveasfilename(
+            defaultextension=".db",
+            filetypes=[("Base de datos","*.db")],
+            initialfile=f"Respaldo_DeclaraFacil_{date.today().isoformat()}.db",
+            title="Guardar respaldo")
+        if not path: return
+        shutil.copy2(get_db_path(), path)
+        messagebox.showinfo("Respaldo","✅ Respaldo guardado correctamente.")
+
+    def _restaurar(self):
+        path = filedialog.askopenfilename(
+            title="Seleccionar respaldo",
+            filetypes=[("Base de datos","*.db")])
+        if not path: return
+        if messagebox.askyesno("Confirmar",
+            "⚠️ Esto reemplazará TODOS los datos actuales.\n¿Está seguro?"):
+            shutil.copy2(path, get_db_path())
+            messagebox.showinfo("Restaurado","✅ Datos restaurados. Reinicie la aplicación.")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VENTANA: Panel de Estadísticas
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class VentanaEstadisticas(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Panel de Estadísticas")
+        self.geometry("720x560")
+        self.configure(bg="white")
+        self._build()
+
+    def _build(self):
+        hdr = tk.Frame(self, bg="#1d4ed8", height=48); hdr.pack(fill="x"); hdr.pack_propagate(False)
+        tk.Label(hdr, text="📊  Panel de Estadísticas",
+                 font=("Arial",13,"bold"), bg="#1d4ed8", fg="white").pack(side="left", padx=16, pady=10)
+
+        # KPI cards
+        kpi_frame = tk.Frame(self, bg="#f8fafc"); kpi_frame.pack(fill="x", padx=16, pady=12)
+
+        total_decl  = db_fetch("SELECT COUNT(*) FROM declaraciones")[0][0]
+        total_cli   = db_fetch("SELECT COUNT(*) FROM clientes")[0][0]
+        total_cop   = db_fetch("SELECT SUM(total_cop) FROM declaraciones")[0][0] or 0
+        mes_actual  = date.today().strftime("%Y-%m")
+        decl_mes    = db_fetch("SELECT COUNT(*) FROM declaraciones WHERE fecha LIKE ?", (f"{mes_actual}%",))[0][0]
+
+        for i,(label,val,color) in enumerate([
+            ("Total declaraciones", str(total_decl), "#1d4ed8"),
+            ("Clientes registrados", str(total_cli),  "#0f766e"),
+            (f"Declaraciones {date.today().strftime('%b %Y')}", str(decl_mes), "#7c3aed"),
+            ("Total liquidado", fmt_cop(total_cop)+" COP", "#dc2626"),
+        ]):
+            card = tk.Frame(kpi_frame, bg="white",
+                            highlightbackground="#e2e8f0", highlightthickness=1)
+            card.grid(row=0, column=i, padx=6, pady=4, sticky="ew")
+            kpi_frame.columnconfigure(i, weight=1)
+            tk.Label(card, text=val, font=("Arial",18,"bold"),
+                     bg="white", fg=color).pack(pady=(12,2))
+            tk.Label(card, text=label, font=("Arial",8),
+                     bg="white", fg="#94a3b8").pack(pady=(0,12))
+
+        # Top clientes
+        tk.Label(self, text="Top 5 Clientes por declaraciones",
+                 font=("Arial",10,"bold"), bg="white", fg="#1d4ed8").pack(anchor="w", padx=16, pady=(8,4))
+        cols = ("Cliente","NIT","Declaraciones","Total COP")
+        tree = ttk.Treeview(self, columns=cols, show="headings", height=5)
+        for c in cols:
+            tree.heading(c, text=c)
+            tree.column(c, width={"Cliente":260,"NIT":120,"Declaraciones":110,"Total COP":160}[c])
+        top = db_fetch("""SELECT c.razon_social, c.nit, COUNT(d.id), SUM(d.total_cop)
+                          FROM clientes c LEFT JOIN declaraciones d ON c.id=d.cliente_id
+                          GROUP BY c.id ORDER BY COUNT(d.id) DESC LIMIT 5""")
+        for r in top:
+            tree.insert("","end", values=(r[0],r[1],r[2],fmt_cop(r[3] or 0)+" COP"))
+        tree.pack(fill="x", padx=16)
+
+        # Declaraciones por mes
+        tk.Label(self, text="Declaraciones por mes (últimos 6 meses)",
+                 font=("Arial",10,"bold"), bg="white", fg="#1d4ed8").pack(anchor="w", padx=16, pady=(16,4))
+        cols2 = ("Mes","Declaraciones","Total COP","Promedio COP")
+        tree2 = ttk.Treeview(self, columns=cols2, show="headings", height=6)
+        for c in cols2:
+            tree2.heading(c, text=c)
+            tree2.column(c, width={"Mes":120,"Declaraciones":120,"Total COP":180,"Promedio COP":180}[c])
+        meses = db_fetch("""SELECT strftime('%Y-%m',fecha) as mes, COUNT(*), SUM(total_cop), AVG(total_cop)
+                            FROM declaraciones WHERE fecha IS NOT NULL
+                            GROUP BY mes ORDER BY mes DESC LIMIT 6""")
+        for r in meses:
+            tree2.insert("","end", values=(r[0],r[1],fmt_cop(r[2] or 0)+" COP",fmt_cop(r[3] or 0)+" COP"))
+        tree2.pack(fill="x", padx=16, pady=(0,16))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VENTANA: Calculadora de Multas
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class VentanaMultas(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Calculadora de Multas y Sanciones DIAN")
+        self.geometry("560x520")
+        self.configure(bg="white")
+        self._build()
+
+    def _build(self):
+        tk.Frame(self, bg="#dc2626", height=4).pack(fill="x")
+        tk.Label(self, text="⚖️  Calculadora de Multas y Sanciones",
+                 font=("Arial",13,"bold"), bg="white", fg="#dc2626").pack(pady=(14,2))
+        tk.Label(self, text="Estimación basada en el Estatuto Aduanero (Decreto 1165/2019)",
+                 font=("Arial",9), bg="white", fg="#64748b").pack(pady=(0,12))
+
+        frame = tk.Frame(self, bg="white"); frame.pack(fill="x", padx=24)
+
+        tk.Label(frame, text="Tipo de infracción:", font=("Arial",10),
+                 bg="white", fg="#475569").pack(anchor="w", pady=(8,2))
+        self.tipo_var = tk.StringVar()
+        tipos = [
+            "Presentación extemporánea de declaración",
+            "Corrección de declaración",
+            "Inexactitud en valores declarados",
+            "No presentación de declaración",
+            "Infracción de importación (Art. 596)",
+        ]
+        cb = ttk.Combobox(frame, values=tipos, textvariable=self.tipo_var,
+                          font=("Arial",11), state="readonly")
+        cb.pack(fill="x"); cb.set(tipos[0])
+        cb.bind("<<ComboboxSelected>>", lambda e: self._calcular())
+
+        tk.Label(frame, text="Valor de los tributos (COP):", font=("Arial",10),
+                 bg="white", fg="#475569").pack(anchor="w", pady=(12,2))
+        self.ent_tributos = tk.Entry(frame, font=("Arial",12), relief="flat",
+                                      highlightbackground="#cbd5e1", highlightthickness=1)
+        self.ent_tributos.pack(fill="x", ipady=6)
+        self.ent_tributos.bind("<KeyRelease>", lambda e: self._calcular())
+
+        tk.Label(frame, text="Días de retraso (si aplica):", font=("Arial",10),
+                 bg="white", fg="#475569").pack(anchor="w", pady=(12,2))
+        self.ent_dias = tk.Entry(frame, font=("Arial",12), relief="flat",
+                                  highlightbackground="#cbd5e1", highlightthickness=1)
+        self.ent_dias.insert(0,"0"); self.ent_dias.pack(fill="x", ipady=6)
+        self.ent_dias.bind("<KeyRelease>", lambda e: self._calcular())
+
+        # Resultado
+        self.res_frame = tk.Frame(self, bg="#fef2f2",
+                                   highlightbackground="#fecaca", highlightthickness=1)
+        self.res_frame.pack(fill="x", padx=24, pady=16)
+        self.lbl_tipo_mul = tk.Label(self.res_frame, text="",
+                                      font=("Arial",9), bg="#fef2f2", fg="#7f1d1d")
+        self.lbl_tipo_mul.pack(anchor="w", padx=12, pady=(10,2))
+        self.lbl_multa = tk.Label(self.res_frame, text="$0 COP",
+                                   font=("Arial",18,"bold"), bg="#fef2f2", fg="#dc2626")
+        self.lbl_multa.pack(pady=(0,4))
+        self.lbl_base = tk.Label(self.res_frame, text="",
+                                  font=("Arial",8), bg="#fef2f2", fg="#94a3b8")
+        self.lbl_base.pack(pady=(0,10))
+
+        tk.Label(self, text="⚠️  Valores de referencia. Consulte con un abogado aduanero para casos específicos.",
+                 font=("Arial",8), bg="white", fg="#94a3b8",
+                 wraplength=500, justify="center").pack(pady=8)
+
+        self._calcular()
+
+    def _calcular(self):
+        try:
+            tributos = float(self.ent_tributos.get().replace(".","").replace(",",".") or 0)
+            dias     = int(self.ent_dias.get() or 0)
+        except: return
+
+        tipo  = self.tipo_var.get()
+        uvt   = 47065  # UVT 2025
+        multa = 0
+        base  = ""
+
+        if "extemporánea" in tipo:
+            # 1.5% por mes o fracción, mínimo 10 UVT
+            meses  = max(1, (dias + 29) // 30)
+            multa  = max(tributos * 0.015 * meses, 10 * uvt)
+            base   = f"1.5% × {meses} mes(es) sobre tributos. Mín. 10 UVT ({fmt_cop(10*uvt)} COP)"
+        elif "Corrección" in tipo:
+            multa = max(tributos * 0.10, 10 * uvt)
+            base  = f"10% sobre tributos. Mínimo 10 UVT ({fmt_cop(10*uvt)} COP)"
+        elif "Inexactitud" in tipo:
+            multa = max(tributos * 1.60, 20 * uvt)
+            base  = f"160% sobre tributos. Mínimo 20 UVT ({fmt_cop(20*uvt)} COP)"
+        elif "No presentación" in tipo:
+            multa = max(tributos * 0.20, 20 * uvt)
+            base  = f"20% sobre tributos. Mínimo 20 UVT ({fmt_cop(20*uvt)} COP)"
+        elif "Art. 596" in tipo:
+            multa = max(200 * uvt, tributos * 0.20)
+            base  = f"Mínimo 200 UVT ({fmt_cop(200*uvt)} COP)"
+
+        self.lbl_multa.config(text=fmt_cop(multa)+" COP")
+        self.lbl_base.config(text=base)
+        self.lbl_tipo_mul.config(text=f"Base de cálculo: {tipo}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VENTANA: Generador de Poder / Autorización
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class VentanaPoder(tk.Toplevel):
+    def __init__(self, parent, data):
+        super().__init__(parent)
+        self.title("Generador de Poder / Autorización")
+        self.geometry("600x560")
+        self.configure(bg="white")
+        self.data = data
+        self._build()
+
+    def _build(self):
+        tk.Frame(self, bg="#1d4ed8", height=4).pack(fill="x")
+        tk.Label(self, text="📝  Poder / Autorización para Agencia de Aduanas",
+                 font=("Arial",12,"bold"), bg="white", fg="#1d4ed8").pack(pady=(14,4))
+
+        frame = tk.Frame(self, bg="white"); frame.pack(fill="both", expand=True, padx=20)
+        agencia = db_fetch("SELECT valor FROM config WHERE clave='agencia_nombre'")
+        ag_nombre = agencia[0][0] if agencia else "LA AGENCIA DE ADUANAS"
+        agencia_nit = db_fetch("SELECT valor FROM config WHERE clave='agencia_nit'")
+        ag_nit = agencia_nit[0][0] if agencia_nit else "NIT AGENCIA"
+
+        fields = {}
+        for label, key, default in [
+            ("Nombre del poderdante (importador):", "poderdante", self.data.get("razonSocial","")),
+            ("NIT / Cédula del poderdante:", "pod_nit", self.data.get("nit","")),
+            ("Descripción de la mercancía:", "mercancias", self.data.get("descripcion","")),
+            ("No. doc. transporte:", "doc_transp", self.data.get("docTransporte","")),
+        ]:
+            tk.Label(frame, text=label, font=("Arial",10), bg="white", fg="#475569").pack(anchor="w", pady=(8,2))
+            w = tk.Entry(frame, font=("Arial",11), relief="flat",
+                         highlightbackground="#cbd5e1", highlightthickness=1)
+            w.insert(0, default); w.pack(fill="x", ipady=5); fields[key] = w
+
+        def generar():
+            pod   = fields["poderdante"].get().strip()
+            pnit  = fields["pod_nit"].get().strip()
+            merc  = fields["mercancias"].get().strip()
+            doc   = fields["doc_transp"].get().strip()
+            fecha = date.today().strftime("%d de %B de %Y")
+            txt = f"""
+                        PODER ESPECIAL
+
+Yo, {pod}, identificado(a) con NIT/CC No. {pnit}, actuando en mi propio nombre
+y representación, por medio del presente documento OTORGO PODER ESPECIAL,
+amplio y suficiente a {ag_nombre} — NIT {ag_nit}, para que en mi nombre
+y representación adelante todos los trámites necesarios ante la DIAN y demás
+autoridades aduaneras, para la importación y nacionalización de la siguiente mercancía:
+
+Descripción: {merc}
+Documento de transporte: {doc}
+
+Este poder incluye facultades para:
+- Presentar y firmar la Declaración de Importación Simplificada (Formulario 510)
+- Pagar los tributos aduaneros correspondientes
+- Recibir la mercancía una vez otorgado el levante
+- Realizar correcciones o modificaciones que sean necesarias
+
+El presente poder se otorga en la ciudad de San Andrés Isla,
+a los {fecha}.
+
+
+_________________________________          _________________________________
+Firma del Poderdante                        Firma del Apoderado
+{pod}                                       {ag_nombre}
+NIT/CC: {pnit}                              NIT: {ag_nit}
+
+Nota: Este documento puede requerir autenticación notarial según el caso.
+"""
+            path = filedialog.asksaveasfilename(
+                defaultextension=".txt", filetypes=[("Texto","*.txt")],
+                initialfile=f"Poder_{pnit}_{date.today().isoformat()}.txt")
+            if not path: return
+            with open(path,"w",encoding="utf-8") as f: f.write(txt)
+            import os; os.startfile(path)
+
+        tk.Button(frame, text="📄  Generar Poder", font=("Arial",11,"bold"),
+                  bg="#1d4ed8", fg="white", relief="flat", pady=10,
+                  cursor="hand2", command=generar).pack(fill="x", pady=16)
