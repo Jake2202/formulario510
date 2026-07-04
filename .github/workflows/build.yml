@@ -1,4 +1,4 @@
-name: Build DeclaraFácil 510 — Instalador
+name: Build DeclaraFácil 510
 
 on:
   push:
@@ -17,19 +17,28 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install Python dependencies
+      - name: Install dependencies
+        run: pip install reportlab openpyxl customtkinter nuitka ordered-set zstandard
+
+      - name: Get customtkinter path
+        id: ctk_path
         run: |
-          pip install reportlab openpyxl customtkinter nuitka ordered-set zstandard
+          $path = python -c "import customtkinter, os; print(os.path.dirname(customtkinter.__file__))"
+          echo "CTK_PATH=$path" >> $env:GITHUB_ENV
+        shell: pwsh
 
       - name: Build EXE with Nuitka
         run: |
-          python -m nuitka --standalone --onefile --windows-console-mode=disable `
+          python -m nuitka `
+            --standalone `
+            --onefile `
+            --windows-console-mode=disable `
             --enable-plugin=tk-inter `
             --follow-imports `
             --include-package=reportlab `
             --include-package=openpyxl `
             --include-package=customtkinter `
-            --include-data-dir=customtkinter=customtkinter `
+            "--include-data-dir=$env:CTK_PATH=customtkinter" `
             --output-filename=Formulario510.exe `
             --remove-output `
             --assume-yes-for-downloads `
