@@ -14,6 +14,19 @@ try:
 except ImportError:
     HAS_XLSX = False
 
+def safe_open_file(path):
+    """Abre un archivo con la aplicación predeterminada del sistema.
+    Guard para evitar crash en entornos de desarrollo no-Windows."""
+    try:
+        if sys.platform == "win32":
+            safe_open_file(path)
+        else:
+            import subprocess
+            subprocess.run(["xdg-open", path], check=False)
+    except Exception as e:
+        print(f"No se pudo abrir el archivo: {e}")
+
+
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.units import mm
@@ -93,7 +106,7 @@ def init_db():
     for k,v in [("agencia_nombre","Mi Agencia de Aduanas"),
                 ("agencia_nit",""),("agencia_tel",""),
                 ("agencia_dir",""),("licencia_key",""),
-                ("licencia_activa","0"),("max_decl_trial","5")]:
+                ("licencia_activa","0"),("max_decl_trial","5"),("uvt_valor","47065")]:
         c.execute("INSERT OR IGNORE INTO config(clave,valor) VALUES(?,?)",(k,v))
     conn.commit(); conn.close()
 
@@ -417,7 +430,13 @@ def make_pdf(data, path):
     story.append(Paragraph(
         f"Pre-diligenciamiento de referencia · No reemplaza declaración oficial ante la DIAN · "
         f"Generado el {date.today().strftime('%d/%m/%Y')}", s_foot))
-    doc.build(story)
+    try:
+        doc.build(story)
+    except Exception as e:
+        raise RuntimeError(
+            f"Error al construir el PDF: {e}\n"
+            "Verifique que todos los campos estén completos y no tengan caracteres inválidos."
+        ) from e
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1415,15 +1434,20 @@ class App(ctk.CTkToplevel):
         except: pass
         doc_transp = self._get_field("docTransporte")
         fecha = date.today().isoformat()
-        if self._decl_id:
-            db_exec("UPDATE declaraciones SET datos=?,total_cop=?,numero=?,fecha=?,estado='Borrador' WHERE id=?",
-                    (json.dumps(data,ensure_ascii=False), self._total_cop, doc_transp, fecha, self._decl_id))
-        else:
-            self._decl_id = db_exec(
-                "INSERT INTO declaraciones(cliente_id,numero,fecha,datos,total_cop,estado) VALUES(?,?,?,?,?,?)",
-                (self._cliente_id, doc_transp, fecha, json.dumps(data,ensure_ascii=False), self._total_cop, "Borrador"))
-            incrementar_contador_uso()
-        messagebox.showinfo("Guardado","✅ Declaración guardada en el historial.")
+        try:
+            if self._decl_id:
+                db_exec("UPDATE declaraciones SET datos=?,total_cop=?,numero=?,fecha=?,estado='Borrador' WHERE id=?",
+                        (json.dumps(data,ensure_ascii=False), self._total_cop, doc_transp, fecha, self._decl_id))
+            else:
+                self._decl_id = db_exec(
+                    "INSERT INTO declaraciones(cliente_id,numero,fecha,datos,total_cop,estado) VALUES(?,?,?,?,?,?)",
+                    (self._cliente_id, doc_transp, fecha, json.dumps(data,ensure_ascii=False), self._total_cop, "Borrador"))
+                incrementar_contador_uso()
+            messagebox.showinfo("Guardado","✅ Declaración guardada en el historial.")
+        except Exception as e:
+            messagebox.showerror("Error al guardar",
+                f"No se pudo guardar la declaración:\n{e}\n\n"
+                "Verifique que la base de datos no esté dañada o en uso por otro proceso.")
 
     def _clear(self):
         if messagebox.askyesno("Confirmar","¿Limpiar todos los campos?"):
@@ -1762,7 +1786,7 @@ class VentanaHistorial(tk.Toplevel):
         if not did: return
         row = db_fetch("SELECT pdf_path FROM declaraciones WHERE id=?", (did,))
         if row and row[0][0] and os.path.exists(row[0][0]):
-            os.startfile(row[0][0])
+            safe_open_file(row[0][0])
         else:
             messagebox.showinfo("Sin PDF","No hay PDF guardado para esta declaración.")
 
@@ -1861,7 +1885,7 @@ class VentanaChecklist(tk.Toplevel):
         tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
                                           delete=False, encoding="utf-8")
         tmp.write(txt); tmp.close()
-        os.startfile(tmp.name)
+        safe_open_file(tmp.name)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2101,7 +2125,7 @@ NOTA: Recibo de referencia. El oficial se genera en el SYGA DIAN.
 """
         tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8")
         tmp.write(txt); tmp.close()
-        os.startfile(tmp.name)
+        safe_open_file(tmp.name)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2440,7 +2464,7 @@ Portal SYGA: https://importaciones.dian.gov.co
         if not path: return
         with open(path,"w",encoding="utf-8") as f:
             f.write(txt)
-        import os; os.startfile(path)
+        import os; safe_open_file(path)
         messagebox.showinfo("Generado",
             f"✅ Solicitud generada:\n{path}\n\n"
             "Preséntela en la seccional DIAN junto con los documentos soporte.")
@@ -2603,7 +2627,7 @@ class VentanaConfigAgencia(tk.Toplevel):
                   cursor="hand2", command=self._respaldar).pack(fill="x", padx=20, pady=(0,8))
         tk.Button(parent, text="📂  Abrir carpeta de datos", font=("Arial",11,"bold"),
                   bg="#1e3a5f", fg="white", relief="flat", pady=8,
-                  cursor="hand2", command=lambda: os.startfile(app_dir)).pack(fill="x", padx=20, pady=(0,8))
+                  cursor="hand2", command=lambda: safe_open_file(app_dir)).pack(fill="x", padx=20, pady=(0,8))
         tk.Button(parent, text="📥  Restaurar respaldo", font=("Arial",11,"bold"),
                   bg="#7c3aed", fg="white", relief="flat", pady=8,
                   cursor="hand2", command=self._restaurar).pack(fill="x", padx=20)
@@ -2657,8 +2681,10 @@ class VentanaConfigAgencia(tk.Toplevel):
             if not u or not p: messagebox.showwarning("Aviso","Complete todos los campos."); return
             if p != p2: messagebox.showwarning("Aviso","Las contraseñas no coinciden."); return
             try:
+                salt = hashlib.sha256(os.urandom(32)).hexdigest()[:16]
+                pwd_hash = hashlib.sha256(f"{salt}{p}".encode()).hexdigest()
                 db_exec("INSERT INTO usuarios(username,password_hash,rol) VALUES(?,?,?)",
-                        (u, hashlib.sha256(p.encode()).hexdigest(), rol_var.get()))
+                        (u, f"{salt}:{pwd_hash}", rol_var.get()))
                 self._cargar_usuarios(); win.destroy()
                 messagebox.showinfo("Creado",f"✅ Usuario '{u}' creado.")
             except: messagebox.showerror("Error","El usuario ya existe.")
@@ -2789,6 +2815,17 @@ class VentanaEstadisticas(tk.Toplevel):
 # VENTANA: Calculadora de Multas
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _get_uvt():
+    """Retorna el valor de la UVT desde la config de la DB.
+    Si no está configurado usa el valor del año actual."""
+    try:
+        rows = db_fetch("SELECT valor FROM config WHERE clave='uvt_valor'")
+        if rows and rows[0][0]:
+            return float(rows[0][0])
+    except: pass
+    return 47065  # UVT 2025 — actualizar en config cada año
+
+
 class VentanaMultas(tk.Toplevel):
     def __init__(self, parent):
         super().__init__(parent)
@@ -2862,7 +2899,7 @@ class VentanaMultas(tk.Toplevel):
         except: return
 
         tipo  = self.tipo_var.get()
-        uvt   = 47065  # UVT 2025
+        uvt   = _get_uvt()  # UVT actualizable desde config
         multa = 0
         base  = ""
 
@@ -2965,8 +3002,9 @@ Nota: Este documento puede requerir autenticación notarial según el caso.
                 initialfile=f"Poder_{pnit}_{date.today().isoformat()}.txt")
             if not path: return
             with open(path,"w",encoding="utf-8") as f: f.write(txt)
-            import os; os.startfile(path)
+            import os; safe_open_file(path)
 
         tk.Button(frame, text="📄  Generar Poder", font=("Arial",11,"bold"),
                   bg="#1d4ed8", fg="white", relief="flat", pady=10,
                   cursor="hand2", command=generar).pack(fill="x", pady=16)
+
